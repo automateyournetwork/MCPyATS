@@ -17,7 +17,7 @@ import httpx
 import traceback
 
 # ✅ Set to your running public A2A Agent
-AGENT_URL = "https://cd93-69-156-133-54.ngrok-free.app"
+AGENT_URL = "https://c111-76-68-137-181.ngrok-free.app"
 
 
 def create_send_message_payload(
