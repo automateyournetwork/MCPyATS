@@ -258,7 +258,7 @@ docker run -p 10000:10000 \
   --add-host=host.docker.internal:host-gateway \
   --env-file .env \
   -e LANGGRAPH_URL=http://host.docker.internal:2024 \
-  -e PUBLIC_BASE_URL=https://cd93-69-156-133-54.ngrok-free.app/ \
+  -e PUBLIC_BASE_URL=https://83e7-76-68-137-181.ngrok-free.app \
   -v $(pwd)/a2a:/a2a \
   -v /home/johncapobianco/MCPyATS/shared_output:/output \
   a2a

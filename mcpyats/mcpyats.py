@@ -545,7 +545,7 @@ async def load_all_tools():
         # ("nist-mcp", ["python3", "server.py", "--oneshot"], "tools/discover", "tools/call"),
         # ("drawio-mcp", "http://host.docker.internal:11434/rpc", "tools/list", "tools/call"),
         # ("subnet-calculator-mcp", ["python3", "main.py", "--oneshot"], "tools/discover", "tools/call"),
-        # ("ise-mcp", ["python3", "main.py", "--oneshot"], "tools/discover", "tools/call")
+        # ("ise-mcp", ["python3", "main.py", "--oneshot"], "tools/discover", "tools/call"),
         # ("wikipedia-mcp", ["python3", "main.py"], "tools/discover", "tools/call"),
         # ("aci-mcp", ["python3", "main.py"], "tools/discover", "tools/call")
     ]
