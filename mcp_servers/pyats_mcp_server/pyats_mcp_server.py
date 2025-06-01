@@ -49,10 +49,25 @@ class LinuxCommandInput(BaseModel):
     device_name: str = Field(..., title="Linux Device Name", description="The name of the Linux device in the testbed.")
     command: str = Field(..., title="Linux Command", description="Linux command to execute (e.g., 'ifconfig', 'ls -l /home')")
     
-# --- Core pyATS Functions (Keep as is) ---
-# _get_device, _disconnect_device, run_show_command, apply_device_configuration,
-# execute_learn_config, execute_learn_logging, run_ping_command
-# ... (These functions remain the same as in your provided script) ...
+def wrap_output_for_clients(output: Any) -> Dict[str, Any]:
+    """Ensure VS Code-friendly response with 'content', while keeping 'text' and 'json' for clients."""
+    if isinstance(output, str):
+        return {
+            "text": output,
+            "raw": output,
+            "content": [{"kind": "text", "text": output}]
+        }
+    if isinstance(output, dict):
+        text_output = json.dumps(output, indent=2)
+        return {
+            "text": text_output,
+            "json": output,
+            "content": [{"kind": "text", "text": text_output}]
+        }
+    return {
+        "text": str(output),
+        "content": [{"kind": "text", "text": str(output)}]
+    }
 
 def _get_device(device_name: str):
     """Helper to load testbed and get/connect to a device, ensuring enable mode."""
@@ -97,10 +112,10 @@ def run_show_command(params: dict) -> dict:
         return {"status": "error", "error": f"Invalid input: {ve}"}
     device = None
     try:
-        disallowed_modifiers = ['|', 'include', 'exclude', 'begin', 'redirect', '>', '<', 'config', 'copy', 'delete', 'erase', 'reload', 'write'] # Added write
+        disallowed_modifiers = ['|', 'include', 'exclude', 'begin', 'redirect', '>', '<', 'config', 'copy', 'delete', 'erase', 'reload', 'write']
         command_lower = validated_input.command.lower().strip()
         if not command_lower.startswith("show"):
-             return {"status": "error", "error": f"Command '{validated_input.command}' is not a 'show' command."}
+            return {"status": "error", "error": f"Command '{validated_input.command}' is not a 'show' command."}
         for part in command_lower.split():
             if part in disallowed_modifiers:
                 return {"status": "error", "error": f"Command '{validated_input.command}' contains disallowed term '{part}'."}
@@ -108,23 +123,19 @@ def run_show_command(params: dict) -> dict:
         device = _get_device(validated_input.device_name)
 
         try:
-             logger.info(f"Attempting to parse command: '{validated_input.command}' on {validated_input.device_name}")
-             parsed_output = device.parse(validated_input.command)
-             logger.info(f"Successfully parsed output for '{validated_input.command}' on {validated_input.device_name}")
-             # Ensure output is JSON serializable (Genie usually is, but good practice)
-             json.dumps(parsed_output)
-             return {"status": "completed", "device": validated_input.device_name, "output": parsed_output}
+            logger.info(f"Attempting to parse command: '{validated_input.command}' on {validated_input.device_name}")
+            parsed_output = device.parse(validated_input.command)
+            logger.info(f"Successfully parsed output for '{validated_input.command}' on {validated_input.device_name}")
+            return parsed_output  # Pass back exactly what the pyATS parser returns
         except Exception as parse_exc:
-             logger.warning(f"Parsing failed for '{validated_input.command}' on {validated_input.device_name}: {parse_exc}. Falling back to execute.")
-             raw_output = device.execute(validated_input.command)
-             logger.info(f"Executed command (fallback): '{validated_input.command}' on {validated_input.device_name}")
-             return {"status": "completed_raw", "device": validated_input.device_name, "output": raw_output}
-
+            logger.warning(f"Parsing failed for '{validated_input.command}' on {validated_input.device_name}: {parse_exc}. Falling back to execute.")
+            raw_output = device.execute(validated_input.command)
+            logger.info(f"Executed command (fallback): '{validated_input.command}' on {validated_input.device_name}")
+            return {"output": str(raw_output)}
     except Exception as e:
         logger.error(f"Error in run_show_command for {validated_input.device_name}: {e}", exc_info=True)
-        # Check if it's a connection error type
         if "Authentication failed" in str(e) or "Timeout connecting" in str(e):
-             return {"status": "error", "error": f"Connection/Auth Error: {e}"}
+            return {"status": "error", "error": f"Connection/Auth Error: {e}"}
         return {"status": "error", "error": f"Execution error: {e}"}
     finally:
         _disconnect_device(device)
@@ -258,7 +269,7 @@ def run_ping_command(params: dict) -> dict:
              logger.warning(f"Parsing ping failed for '{validated_input.command}' on {validated_input.device_name}: {parse_exc}. Falling back to execute.")
              raw_output = device.execute(validated_input.command)
              logger.info(f"Executed ping (fallback): '{validated_input.command}' on {validated_input.device_name}")
-             return {"status": "completed_raw", "device": validated_input.device_name, "output": raw_output}
+             return {"status": "completed_raw", "device": ..., "output": wrap_output_for_clients(raw_output)}
 
     except Exception as e:
         logger.error(f"Error in run_ping_command for {validated_input.device_name}: {e}", exc_info=True)
@@ -329,32 +340,32 @@ def run_linux_command_tool(params: dict) -> dict:
 # --- Tool Definitions ---
 
 AVAILABLE_TOOLS = {
-    "pyATS_run_show_command": {
+    "pyats_run_show_command": {
         "function": run_show_command,
         "description": "Executes a general Cisco IOS/NX-OS 'show' command (e.g., 'show ip interface brief', 'show version', 'show inventory') on a specified device to gather its current operational state or specific information. Returns parsed JSON output when available, otherwise returns raw text output. Use this for general device information gathering. Requires 'device_name' and the exact 'command' string.",
         "input_model": DeviceCommandInput
     },
-    "pyATS_configure_device": {
+    "pyats_configure_device": {
         "function": apply_device_configuration,
         "description": "Applies configuration commands to a specified Cisco IOS/NX-OS device. Enters configuration mode and executes the provided commands to modify the device's settings. Use this for making changes to the device configuration. Requires 'device_name' and the 'config_commands' (can be multi-line).",
         "input_model": ConfigInput
     },
-    "pyATS_show_running_config": {
+    "pyats_show_running_config": {
         "function": execute_learn_config,
          "description": "Retrieves the full running configuration from a Cisco IOS/NX-OS device using 'show running-config'. Returns raw text output as there is no parser available. Requires 'device_name'.",
         "input_model": DeviceOnlyInput
     },
-    "pyATS_show_logging": {
+    "pyats_show_logging": {
         "function": execute_learn_logging,
         "description": "Retrieves recent system logs using 'show logging last 250' on a Cisco IOS/NX-OS device. Returns raw text output. Requires 'device_name'.",
         "input_model": DeviceOnlyInput
     },
-    "pyATS_ping_from_network_device": {
+    "pyats_ping_from_network_device": {
         "function": run_ping_command,
         "description": "Executes a 'ping' command on a specified Cisco IOS/NX-OS device to test network reachability to a target IP address or hostname (e.g., 'ping 8.8.8.8', 'ping vrf MGMT 10.0.0.1'). Returns parsed JSON output for standard pings when possible, otherwise raw text. Requires 'device_name' and the exact 'command' string.",
         "input_model": DeviceCommandInput
     },
-    "pyATS_run_linux_command": {
+    "pyats_run_linux_command": {
         "function": run_linux_command_tool,
         "description": "Executes common Linux commands on a specified device (e.g., 'ifconfig', 'ps -ef', 'netstat -rn', including piping and redirection). Parsed output is returned when available, otherwise raw output.",
         "input_model": LinuxCommandInput
@@ -404,6 +415,10 @@ def call_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     tool_info = AVAILABLE_TOOLS[tool_name]
     func = tool_info["function"]
+
+    # Unwrap 'params' if present
+    if isinstance(arguments, dict) and "params" in arguments and isinstance(arguments["params"], dict):
+        arguments = arguments["params"]
 
     try:
         result_data = func(arguments)
@@ -503,6 +518,7 @@ async def process_request(request_data: Dict[str, Any]) -> Optional[Dict[str, An
 def send_response(response_data: Dict[str, Any]):
     try:
         response_string = json.dumps(response_data) + "\n"
+        logger.info(f"Sending response: {response_string.strip()}")  # Log the response being sent
         sys.stdout.write(response_string)
         sys.stdout.flush()
         logger.debug(f"Sent response: {response_string.strip()}")

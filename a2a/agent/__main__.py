@@ -2,18 +2,88 @@ import os
 import httpx
 import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+from fastapi.middleware import Middleware
+from fastapi.responses import RedirectResponse, JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
-from .agent_executor import LangGraphAgentExecutor
+from authlib.integrations.starlette_client import OAuth
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.tasks import InMemoryTaskStore, InMemoryPushNotifier
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.types import AgentCard, AgentCapabilities, AgentSkill
 
-load_dotenv()
+from .agent_executor import LangGraphAgentExecutor
 
+# === Load config ===
+load_dotenv()
 HOST = os.getenv("A2A_HOST", "0.0.0.0")
 PORT = int(os.getenv("A2A_PORT", 10000))
 PUBLIC_URL = os.getenv("PUBLIC_BASE_URL", f"http://localhost:{PORT}")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "supersecret")
+
+# === OAuth Setup ===
+oauth = OAuth()
+oauth.register(
+    name='google',
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={'scope': 'openid email profile'},
+)
+
+# === Middleware and Main App ===
+app = FastAPI(
+    middleware=[Middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="none", https_only=True)]
+)
+
+@app.get("/")
+async def home(request: Request):
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login")
+    return JSONResponse({"message": "Welcome to the MCpyATS Agent. POST to / with A2A requests."})
+
+@app.get("/login")
+async def login(request: Request):
+    redirect_uri = f"{PUBLIC_URL}/auth"
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+@app.get("/auth")
+async def auth(request: Request):
+    token = await oauth.google.authorize_access_token(request)
+    user = await oauth.google.parse_id_token(request, token)
+    request.session["user"] = dict(user)
+    return RedirectResponse(url="/")
+
+@app.get("/.well-known/agent.json")
+async def agent_card():
+    card = build_agent_card()
+    card_dict = card.model_dump(exclude_none=False)
+    card_dict["endpoint"] = PUBLIC_URL  # Root endpoint, not /agent
+    return JSONResponse(content=card_dict)
+
+class InjectBearerUserMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            try:
+                token = auth_header.split(" ", 1)[1]
+                id_info = id_token.verify_oauth2_token(
+                    token,
+                    google_requests.Request(),
+                    GOOGLE_CLIENT_ID
+                )
+                request.state.user = dict(id_info)
+            except Exception as e:
+                return JSONResponse({"error": f"Invalid Bearer token: {str(e)}"}, status_code=401)
+        return await call_next(request)
 
 def build_agent_card() -> AgentCard:
     return AgentCard(
@@ -21,37 +91,41 @@ def build_agent_card() -> AgentCard:
         description="Cisco pyATS LangGraph agent with A2A interface",
         version="1.0.0",
         url=PUBLIC_URL,
-        endpoint=PUBLIC_URL,
-        defaultInputModes=["text"],   # ✅ REQUIRED
-        defaultOutputModes=["text"],  # ✅ REQUIRED
+        endpoint=PUBLIC_URL,  # Root endpoint
+        defaultInputModes=["text"],
+        defaultOutputModes=["text"],
         capabilities=AgentCapabilities(
             a2a=True,
             toolUse=True,
             chat=True,
             streaming=True,
-            pushNotifications=True
+            push=True,
         ),
         skills=[
             AgentSkill(
-                id="mcpyats_query",
-                name="Run a LangGraph task",
-                description="Run pyATS tasks and more with LangGraph",
-                examples=["Check interface status", "Get BGP peers"],
-                tags=["pyats", "network automation", "langgraph"]
+                id="pyats",
+                name="Cisco pyATS",
+                description="Run show commands or perform configuration management on Cisco network devices",
+                tags=["cisco", "network", "automation", "show commands", "configure"]
             )
         ]
     )
 
-def main():
-    executor = LangGraphAgentExecutor()
-    request_handler = DefaultRequestHandler(
-        agent_executor=executor,
-        task_store=InMemoryTaskStore(),
-        push_notifier=InMemoryPushNotifier(httpx.AsyncClient()),
-    )
+executor = LangGraphAgentExecutor()
+request_handler = DefaultRequestHandler(
+    agent_executor=executor,
+    task_store=InMemoryTaskStore(),
+    push_notifier=InMemoryPushNotifier(httpx.AsyncClient()),
+)
+a2a_app = A2AStarletteApplication(
+    agent_card=build_agent_card(),
+    http_handler=request_handler,
+)
 
-    app = A2AStarletteApplication(agent_card=build_agent_card(), http_handler=request_handler)
-    uvicorn.run(app.build(), host=HOST, port=PORT)
+# Add Bearer Auth middleware to main app
+app.add_middleware(InjectBearerUserMiddleware)
+# Mount A2A agent at root ("/")
+app.mount("/", a2a_app.build())
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run("agent.__main__:app", host=HOST, port=PORT, reload=True)

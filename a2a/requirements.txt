@@ -2,3 +2,9 @@ a2a-sdk
 httpx
 uvicorn
 python-dotenv
+authlib
+fastapi
+starlette
+itsdangerous
+google-auth
+requests
