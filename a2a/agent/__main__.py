@@ -27,8 +27,9 @@ PUBLIC_URL = os.getenv("PUBLIC_BASE_URL", f"http://localhost:{PORT}")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "supersecret")
+TRUSTED_AGENT_EMAILS = os.getenv("TRUSTED_AGENT_EMAILS", "").split(",")
 
-# === OAuth Setup ===
+# === OAuth Setup for Human Login ===
 oauth = OAuth()
 oauth.register(
     name='google',
@@ -38,7 +39,7 @@ oauth.register(
     client_kwargs={'scope': 'openid email profile'},
 )
 
-# === Middleware and Main App ===
+# === Middleware and App ===
 app = FastAPI(
     middleware=[Middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="none", https_only=True)]
 )
@@ -66,32 +67,39 @@ async def auth(request: Request):
 async def agent_card():
     card = build_agent_card()
     card_dict = card.model_dump(exclude_none=False)
-    card_dict["endpoint"] = PUBLIC_URL  # Root endpoint, not /agent
+    card_dict["endpoint"] = PUBLIC_URL
     return JSONResponse(content=card_dict)
 
+# === A2A & H2A Bearer Token Middleware ===
 class InjectBearerUserMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1]
             try:
-                token = auth_header.split(" ", 1)[1]
                 id_info = id_token.verify_oauth2_token(
                     token,
                     google_requests.Request(),
                     GOOGLE_CLIENT_ID
                 )
-                request.state.user = dict(id_info)
+                email = id_info.get("email")
+                if not email:
+                    raise ValueError("No email in ID token")
+                if email not in TRUSTED_AGENT_EMAILS:
+                    return JSONResponse({"error": f"Unauthorized agent: {email}"}, status_code=403)
+                request.state.user = id_info  # ✅ Agent is now trusted
             except Exception as e:
                 return JSONResponse({"error": f"Invalid Bearer token: {str(e)}"}, status_code=401)
         return await call_next(request)
 
+# === Agent Metadata ===
 def build_agent_card() -> AgentCard:
     return AgentCard(
         name="MCpyATS",
         description="Cisco pyATS LangGraph agent with A2A interface",
         version="1.0.0",
         url=PUBLIC_URL,
-        endpoint=PUBLIC_URL,  # Root endpoint
+        endpoint=PUBLIC_URL,
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         capabilities=AgentCapabilities(
@@ -111,6 +119,7 @@ def build_agent_card() -> AgentCard:
         ]
     )
 
+# === A2A App Setup ===
 executor = LangGraphAgentExecutor()
 request_handler = DefaultRequestHandler(
     agent_executor=executor,
@@ -122,9 +131,8 @@ a2a_app = A2AStarletteApplication(
     http_handler=request_handler,
 )
 
-# Add Bearer Auth middleware to main app
+# === Mount A2A Agent ===
 app.add_middleware(InjectBearerUserMiddleware)
-# Mount A2A agent at root ("/")
 app.mount("/", a2a_app.build())
 
 if __name__ == "__main__":
