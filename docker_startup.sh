@@ -103,9 +103,9 @@ echo "pyats-mcp image built successfully."
 # docker build -t drawio-mcp ./mcp_servers/drawio_mcp
 # echo "drawio-mcp image built successfully"
 
-# echo "Building a2a image..."
-# docker build -t a2a ./a2a
-# echo "a2a image built successfully"
+echo "Building a2a image..."
+docker build -t a2a ./a2a
+echo "a2a image built successfully"
 
 # echo "Building streamlit-app image..."
 # docker build -t streamlit-app ./streamlit
@@ -258,7 +258,7 @@ docker run -p 10000:10000 \
   --add-host=host.docker.internal:host-gateway \
   --env-file .env \
   -e LANGGRAPH_URL=http://host.docker.internal:2024 \
-  -e PUBLIC_BASE_URL=https://d057-142-126-56-154.ngrok-free.app \
+  -e PUBLIC_BASE_URL=https://f850-142-126-56-154.ngrok-free.app  \
   -v $(pwd)/a2a:/a2a \
   -v /home/johncapobianco/MCPyATS/shared_output:/output \
   a2a

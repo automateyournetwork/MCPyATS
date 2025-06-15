@@ -1,15 +1,20 @@
 import os
+import uuid
 import base64
 import httpx
 import uvicorn
 from io import BytesIO
-from gtts import gTTS
+from asyncio import Queue
+from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware import Middleware
 from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+
+import speech_recognition as sr
+from pydub import AudioSegment
 
 from authlib.integrations.starlette_client import OAuth
 from google.oauth2 import id_token
@@ -18,7 +23,8 @@ from google.auth.transport import requests as google_requests
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.tasks import InMemoryTaskStore, InMemoryPushNotifier
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.types import AgentCard, AgentCapabilities, AgentSkill
+from a2a.types import AgentCard, AgentCapabilities, AgentSkill, TaskState, Message
+from a2a.server.agent_execution import RequestContext
 
 from .agent_executor import LangGraphAgentExecutor
 
@@ -70,12 +76,107 @@ async def auth(request: Request):
 async def agent_card():
     card = build_agent_card()
     card_dict = card.model_dump(exclude_none=False)
-    card_dict["endpoint"] = PUBLIC_URL  # ✅ No /a2a
+    card_dict["endpoint"] = PUBLIC_URL
     return JSONResponse(content=card_dict)
+
+# === Audio Input Endpoint ===
+@app.post("/audio")
+async def handle_audio_input(request: Request, file: UploadFile = File(...)):
+    print(f"📥 Received audio upload: filename={file.filename}, content_type={file.content_type}")
+    
+    # Validate file is present
+    if not file or not file.filename:
+        print("❌ No file provided or empty filename")
+        return JSONResponse({"error": "No file provided"}, status_code=400)
+    
+    try:
+        audio_bytes = await file.read()
+        print(f"📏 Received file size: {len(audio_bytes)} bytes")
+        
+        # Check if file is empty
+        if len(audio_bytes) == 0:
+            print("❌ Received empty file")
+            return JSONResponse({"error": "Empty file received"}, status_code=400)
+
+        try:
+            # Try to decode with pydub
+            audio = AudioSegment.from_file(BytesIO(audio_bytes))
+        except Exception as decode_err:
+            print(f"❌ Failed to decode audio input with pydub: {decode_err}")
+            # Try to get more info about the file
+            print(f"🔍 File details - Name: {file.filename}, Type: {file.content_type}, Size: {len(audio_bytes)}")
+            return JSONResponse({"error": f"Could not decode audio input: {str(decode_err)}"}, status_code=400)
+
+        # Convert to WAV for speech recognition
+        wav_io = BytesIO()
+        try:
+            audio.export(wav_io, format="wav", parameters=["-acodec", "pcm_s16le"])
+            with open("/tmp/debug_audio.wav", "wb") as f:
+                f.write(wav_io.getbuffer())
+            print("💾 Saved /tmp/debug_audio.wav for inspection")            
+            wav_io.seek(0)
+        except Exception as export_err:
+            print(f"❌ Failed to convert audio to WAV: {export_err}")
+            return JSONResponse({"error": f"Audio conversion failed: {str(export_err)}"}, status_code=400)
+
+        # Speech recognition
+        recognizer = sr.Recognizer()
+        try:
+            with sr.AudioFile(wav_io) as source:
+                audio_data = recognizer.record(source)
+                transcribed_text = recognizer.recognize_google(audio_data)
+                print(f"📝 Transcription: {transcribed_text}")
+        except sr.UnknownValueError:
+            print("❌ Could not understand audio")
+            return JSONResponse({"error": "Could not understand audio"}, status_code=400)
+        except sr.RequestError as e:
+            print(f"❌ Speech recognition error: {e}")
+            return JSONResponse({"error": f"Speech recognition error: {e}"}, status_code=500)
+
+        # Process with agent
+        message = Message(
+            role="user",
+            messageId=str(uuid.uuid4()),
+            parts=[{"kind": "text", "text": transcribed_text}]  # ✅ Use a plain dict here
+        )
+        context = RequestContext(
+            mesaage=message,
+            context_id=str(uuid.uuid4()),
+            task_id=str(uuid.uuid4())
+        )
+        queue = Queue()
+        await executor.execute(context, queue)
+
+        response_text = ""
+        while not queue.empty():
+            evt = await queue.get()
+            if hasattr(evt, "message") and evt.state == TaskState.completed:
+                response_text = evt.message.parts[0].text
+                break
+
+        print(f"🤖 Final agent response: {response_text}")
+
+        return JSONResponse({
+            "message": {
+                "role": "assistant",
+                "messageId": str(uuid.uuid4()),
+                "parts": [{"kind": "text", "text": response_text}],
+                "input_transcription": transcribed_text
+            }
+        })
+
+    except Exception as e:
+        print(f"❌ Unexpected error in audio processing: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"error": f"Audio processing error: {str(e)}"}, status_code=500)
 
 # === A2A & H2A Bearer Token Middleware ===
 class InjectBearerUserMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        if request.url.path in ["/audio", "/.well-known/agent.json"]:
+            return await call_next(request)
+
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
             token = auth_header.split(" ", 1)[1]
@@ -94,14 +195,6 @@ class InjectBearerUserMiddleware(BaseHTTPMiddleware):
             except Exception as e:
                 return JSONResponse({"error": f"Invalid Bearer token: {str(e)}"}, status_code=401)
         return await call_next(request)
-
-# === Text-to-Speech (gTTS) ===
-async def text_to_speech_gtts(text: str) -> str:
-    tts = gTTS(text)
-    mp3_fp = BytesIO()
-    tts.write_to_fp(mp3_fp)
-    mp3_fp.seek(0)
-    return base64.b64encode(mp3_fp.read()).decode("utf-8")
 
 # === Agent Metadata ===
 def build_agent_card() -> AgentCard:
@@ -130,22 +223,6 @@ def build_agent_card() -> AgentCard:
         ]
     )
 
-# === Audio Input Endpoint ===
-@app.post("/audio")
-async def handle_audio_input(request: Request, file: UploadFile = File(...)):
-    audio_bytes = await file.read()
-    transcribed_text = "show ip route"  # 🔁 Replace with actual STT logic
-    response_text = await executor.execute(transcribed_text)
-    audio_base64 = await text_to_speech_gtts(response_text)
-    return JSONResponse({
-        "message": {
-            "parts": [
-                {"kind": "text", "text": response_text},
-                {"kind": "audio", "mimeType": "audio/mp3", "data": audio_base64}
-            ]
-        }
-    })
-
 # === A2A App Setup ===
 executor = LangGraphAgentExecutor()
 request_handler = DefaultRequestHandler(
@@ -163,5 +240,4 @@ app.add_middleware(InjectBearerUserMiddleware)
 app.mount("/a2a", a2a_app.build())
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=HOST, port=PORT, reload=True)
-
+    uvicorn.run(app, host=HOST, port=PORT)

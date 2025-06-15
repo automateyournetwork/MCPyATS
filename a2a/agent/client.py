@@ -4,6 +4,7 @@ import traceback
 from uuid import uuid4
 from typing import Any
 from urllib.parse import urlparse, parse_qs, urljoin
+import numpy as np
 
 import httpx
 from dotenv import load_dotenv
@@ -99,30 +100,94 @@ def extract_clean_text(task_data: dict[str, Any]) -> str:
 # === Microphone recording and upload ===
 async def record_and_send_audio(http_client: httpx.AsyncClient, agent_endpoint: str, duration_sec: int = 7):
     print(f"🎙️ Recording {duration_sec} seconds of audio...")
-    fs = 44100
-    recording = sd.rec(int(duration_sec * fs), samplerate=fs, channels=1)
-    sd.wait()
-    with NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-        write(temp_wav.name, fs, recording)
-        wav_path = temp_wav.name
-    with NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
-        audio = AudioSegment.from_wav(wav_path)
-        audio.export(temp_mp3.name, format="mp3")
-        mp3_path = temp_mp3.name
-    print(f"🔊 Uploading MP3 to agent...")
-    with open(mp3_path, "rb") as f:
-        files = {"file": ("voice.mp3", f, "audio/mpeg")}
-        # Extract root URL from agent_endpoint (strip off trailing /a2a)
-        audio_url = agent_endpoint.rstrip("/").removesuffix("/a2a") + "/audio"
-        response = await http_client.post(audio_url, files=files)
-        
-    response.raise_for_status()
-    data = response.json()
-    text = None
-    for part in data.get("message", {}).get("parts", []):
-        if part.get("kind") == "text":
-            text = part.get("text")
-    print(f"📝 Agent response: {text}")
+
+    try:
+        # Record audio in int16 format for direct WAV compatibility
+        fs = 16000  # Sample rate preferred for speech recognition
+        recording = sd.rec(int(duration_sec * fs), samplerate=fs, channels=1, dtype='int16')
+        sd.wait()  # Wait until recording is finished
+
+        # Save as temporary WAV file
+        with NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+            write(temp_wav.name, fs, recording)
+            wav_path = temp_wav.name
+
+        print(f"📁 Created temporary WAV file: {wav_path}")
+
+        # Convert to MP3 using pydub
+        try:
+            audio = AudioSegment.from_wav(wav_path)
+            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+
+            with NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
+                audio.export(temp_mp3.name, format="mp3", bitrate="64k")
+                mp3_path = temp_mp3.name
+
+            print(f"📁 Created temporary MP3 file: {mp3_path}")
+
+            file_size = os.path.getsize(mp3_path)
+            print(f"📏 MP3 file size: {file_size} bytes")
+
+            if file_size == 0:
+                print("❌ Generated MP3 file is empty!")
+                return
+
+        except Exception as convert_err:
+            print(f"❌ Error converting audio: {convert_err}")
+            return
+
+        # Upload to server
+        print(f"🔊 Uploading MP3 to agent...")
+        base_url = agent_endpoint.rstrip("/").removesuffix("/a2a")
+        audio_url = f"{base_url}/audio"
+        print(f"🎯 Posting to: {audio_url}")
+
+        try:
+            with open(mp3_path, "rb") as f:
+                files = {"file": ("voice.mp3", f, "audio/mpeg")}
+                async with httpx.AsyncClient(timeout=60.0) as audio_client:
+                    response = await audio_client.post(audio_url, files=files)
+
+        except Exception as upload_err:
+            print(f"❌ Error during upload: {upload_err}")
+            return
+
+        # Clean up temporary files
+        try:
+            os.unlink(wav_path)
+            os.unlink(mp3_path)
+        except Exception as cleanup_err:
+            print(f"⚠️ Cleanup error: {cleanup_err}")
+
+        # Process response
+        try:
+            response.raise_for_status()
+            data = response.json()
+            message_data = data.get("message", {})
+
+            if isinstance(message_data, dict):
+                parts = message_data.get("parts", [])
+                for part in parts:
+                    if part.get("kind") == "text":
+                        response_text = part.get("text", "")
+                        print(f"📝 Agent response: {response_text}")
+                        return
+
+                response_text = message_data.get("response", "")
+                if response_text:
+                    print(f"📝 Agent response: {response_text}")
+                    return
+
+            print(f"⚠️ Unexpected response format: {data}")
+
+        except httpx.HTTPStatusError as e:
+            print(f"❌ HTTP error {e.response.status_code}: {e.response.text}")
+        except Exception as e:
+            print(f"❌ Error processing response: {e}")
+
+    except Exception as e:
+        print(f"❌ Error in record_and_send_audio: {e}")
+        traceback.print_exc()
 
 # === Chat loop ===
 async def chat_loop(client: A2AClient, raw_http_client: httpx.AsyncClient, agent_endpoint: str):
