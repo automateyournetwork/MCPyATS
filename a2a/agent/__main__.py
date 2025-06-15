@@ -1,6 +1,5 @@
 import os
 import uuid
-import base64
 import httpx
 import uvicorn
 from io import BytesIO
@@ -23,8 +22,7 @@ from google.auth.transport import requests as google_requests
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.tasks import InMemoryTaskStore, InMemoryPushNotifier
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.types import AgentCard, AgentCapabilities, AgentSkill, SendMessageRequest, Message
-from a2a.server.agent_execution import RequestContext
+from a2a.types import AgentCard, AgentCapabilities, AgentSkill
 
 from .agent_executor import LangGraphAgentExecutor
 
@@ -38,7 +36,7 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "supersecret")
 TRUSTED_AGENT_EMAILS = os.getenv("TRUSTED_AGENT_EMAILS", "").split(",")
 
-# === OAuth Setup for Human Login ===
+# === OAuth Setup ===
 oauth = OAuth()
 oauth.register(
     name='google',
@@ -53,13 +51,6 @@ app = FastAPI(
     middleware=[Middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="none", https_only=True)]
 )
 
-@app.get("/")
-async def home(request: Request):
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login")
-    return JSONResponse({"message": "Welcome to the MCpyATS Agent. POST to / with A2A requests."})
-
 @app.get("/login")
 async def login(request: Request):
     redirect_uri = f"{PUBLIC_URL}/auth"
@@ -70,7 +61,6 @@ async def auth(request: Request):
     token = await oauth.google.authorize_access_token(request)
     user = await oauth.google.parse_id_token(request, token)
     request.session["user"] = dict(user)
-    request.session["user"]["id_token"] = token["id_token"]  # ✅ Save id_token
     return RedirectResponse(url="/")
 
 @app.get("/.well-known/agent.json")
@@ -80,80 +70,43 @@ async def agent_card():
     card_dict["endpoint"] = PUBLIC_URL
     return JSONResponse(content=card_dict)
 
-# === Audio Input Endpoint ===
 @app.post("/audio")
-async def handle_audio_input(request: Request, file: UploadFile = File(...)):
-    print(f"📥 Received audio upload: filename={file.filename}, content_type={file.content_type}")
-    
-    if not file or not file.filename:
-        return JSONResponse({"error": "No file provided"}, status_code=400)
-
+async def handle_audio_input(file: UploadFile = File(...)):
     try:
         audio_bytes = await file.read()
-        if len(audio_bytes) == 0:
-            return JSONResponse({"error": "Empty file received"}, status_code=400)
-
-        try:
-            audio = AudioSegment.from_file(BytesIO(audio_bytes))
-        except Exception as decode_err:
-            return JSONResponse({"error": f"Could not decode audio input: {str(decode_err)}"}, status_code=400)
-
+        audio = AudioSegment.from_file(BytesIO(audio_bytes))
         wav_io = BytesIO()
         audio.export(wav_io, format="wav", parameters=["-acodec", "pcm_s16le"])
         wav_io.seek(0)
-
         recognizer = sr.Recognizer()
         with sr.AudioFile(wav_io) as source:
             audio_data = recognizer.record(source)
             transcribed_text = recognizer.recognize_google(audio_data)
-            print(f"📝 Transcription: {transcribed_text}")
 
-        # Format as SendMessageRequest JSON
-        text_payload = {
-            "type": "SendMessageRequest",
-            "params": {
-                "message": {
-                    "role": "user",
-                    "messageId": str(uuid.uuid4()),
-                    "parts": [{"kind": "text", "text": transcribed_text}]
-                }
-            }
-        }
-
-        headers = {}
-        user = request.session.get("user")
-        if user and "id_token" in user:
-            headers["Authorization"] = f"Bearer {user['id_token']}"
-
-        # ✅ Post to A2A endpoint
+        # Forward transcription to /messages
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{PUBLIC_URL}/a2a/messages",
-                json=text_payload,
-                headers=headers,
-                timeout=30.0
+                f"{PUBLIC_URL}/messages",
+                json={
+                    "type": "SendMessageRequest",
+                    "params": {
+                        "message": {
+                            "role": "user",
+                            "messageId": str(uuid.uuid4()),
+                            "parts": [{"kind": "text", "text": transcribed_text}]
+                        }
+                    }
+                }
             )
-
         return JSONResponse({
             "transcription": transcribed_text,
             "agent_response": response.json()
         })
-
-    except sr.UnknownValueError:
-        return JSONResponse({"error": "Could not understand audio"}, status_code=400)
-    except sr.RequestError as e:
-        return JSONResponse({"error": f"Speech recognition error: {e}"}, status_code=500)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return JSONResponse({"error": f"Audio processing error: {str(e)}"}, status_code=500)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-# === Middleware to Inject Bearer User ===
 class InjectBearerUserMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in ["/audio", "/.well-known/agent.json"]:
-            return await call_next(request)
-
         auth_header = request.headers.get("authorization")
         if auth_header and auth_header.lower().startswith("bearer "):
             token = auth_header.split(" ", 1)[1]
@@ -198,23 +151,19 @@ def build_agent_card() -> AgentCard:
         ]
     )
 
-# === A2A App Setup ===
 executor = LangGraphAgentExecutor()
-
 request_handler = DefaultRequestHandler(
     agent_executor=executor,
     task_store=InMemoryTaskStore(),
     push_notifier=InMemoryPushNotifier(httpx.AsyncClient()),
 )
-
 a2a_app = A2AStarletteApplication(
     agent_card=build_agent_card(),
     http_handler=request_handler,
 )
 
-# === Mount A2A Agent ===
 app.add_middleware(InjectBearerUserMiddleware)
-app.mount("/a2a", a2a_app.build())
+app.mount("/", a2a_app.build())
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run("agent.__main__:app", host=HOST, port=PORT, reload=True)
