@@ -19,6 +19,11 @@ from a2a.types import (
     TaskState,
 )
 
+import sounddevice as sd
+from scipy.io.wavfile import write
+from pydub import AudioSegment
+from tempfile import NamedTemporaryFile
+
 # === Load environment variables ===
 load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -91,16 +96,47 @@ def extract_clean_text(task_data: dict[str, Any]) -> str:
     except Exception as e:
         return f"[⚠️ Error extracting answer: {e} from data: {task_data}]"
 
+# === Microphone recording and upload ===
+async def record_and_send_audio(http_client: httpx.AsyncClient, agent_endpoint: str, duration_sec: int = 7):
+    print(f"🎙️ Recording {duration_sec} seconds of audio...")
+    fs = 44100
+    recording = sd.rec(int(duration_sec * fs), samplerate=fs, channels=1)
+    sd.wait()
+    with NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+        write(temp_wav.name, fs, recording)
+        wav_path = temp_wav.name
+    with NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
+        audio = AudioSegment.from_wav(wav_path)
+        audio.export(temp_mp3.name, format="mp3")
+        mp3_path = temp_mp3.name
+    print(f"🔊 Uploading MP3 to agent...")
+    with open(mp3_path, "rb") as f:
+        files = {"file": ("voice.mp3", f, "audio/mpeg")}
+        # Extract root URL from agent_endpoint (strip off trailing /a2a)
+        audio_url = agent_endpoint.rstrip("/").removesuffix("/a2a") + "/audio"
+        response = await http_client.post(audio_url, files=files)
+        
+    response.raise_for_status()
+    data = response.json()
+    text = None
+    for part in data.get("message", {}).get("parts", []):
+        if part.get("kind") == "text":
+            text = part.get("text")
+    print(f"📝 Agent response: {text}")
+
 # === Chat loop ===
-async def chat_loop(client: A2AClient):
+async def chat_loop(client: A2AClient, raw_http_client: httpx.AsyncClient, agent_endpoint: str):
     context_id = None
     task_id = None
     while True:
         try:
-            user_input = input("\n❓ Question: ").strip()
+            user_input = input("\n❓ Question (or type 'mic' to use microphone): ").strip()
             if not user_input:
                 print("👋 Exiting.")
                 break
+            if user_input.lower() == "mic":
+                await record_and_send_audio(raw_http_client, agent_endpoint)
+                continue
             payload = create_send_message_payload(user_input, task_id, context_id)
             request = SendMessageRequest(params=MessageSendParams(**payload))
             print(f"🚀 Sending message to: {getattr(client, 'agent_endpoint', 'N/A')}")
@@ -149,10 +185,10 @@ async def main():
             agent_card_resp = await http_client_session.get(agent_card_full_url)
             agent_card_resp.raise_for_status()
             agent_card = agent_card_resp.json()
-            print(f"🃏 Agent card content: {agent_card}")
-            discovered_endpoint = agent_card.get("endpoint")
-            print(f"🗺️ Endpoint from agent card: {discovered_endpoint}")
-
+            discovered_endpoint = str(agent_card.get("endpoint", "")).strip()
+            if not discovered_endpoint.startswith("http"):
+                raise ValueError(f"❌ Invalid agent endpoint in card: {discovered_endpoint}")
+            
             print(f"🛠️ Initializing A2AClient using agent card endpoint.")
             client = await A2AClient.get_client_from_agent_card_url(
                 httpx_client=http_client_session,
@@ -161,7 +197,7 @@ async def main():
             )
             print(f"✅ Client initialized. Effective POST endpoint: {getattr(client, 'agent_endpoint', 'unknown')}")
             print(f"🗣️ Starting chat loop...\n")
-            await chat_loop(client)
+            await chat_loop(client, raw_http_client=http_client_session, agent_endpoint=discovered_endpoint)
 
     except httpx.HTTPStatusError as e:
         traceback.print_exc()

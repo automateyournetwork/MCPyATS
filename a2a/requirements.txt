@@ -8,3 +8,4 @@ starlette
 itsdangerous
 google-auth
 requests
+gTTS

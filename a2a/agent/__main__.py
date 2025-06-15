@@ -1,8 +1,11 @@
 import os
+import base64
 import httpx
 import uvicorn
+from io import BytesIO
+from gtts import gTTS
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware import Middleware
 from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
@@ -67,7 +70,7 @@ async def auth(request: Request):
 async def agent_card():
     card = build_agent_card()
     card_dict = card.model_dump(exclude_none=False)
-    card_dict["endpoint"] = PUBLIC_URL
+    card_dict["endpoint"] = PUBLIC_URL  # ✅ No /a2a
     return JSONResponse(content=card_dict)
 
 # === A2A & H2A Bearer Token Middleware ===
@@ -87,10 +90,18 @@ class InjectBearerUserMiddleware(BaseHTTPMiddleware):
                     raise ValueError("No email in ID token")
                 if email not in TRUSTED_AGENT_EMAILS:
                     return JSONResponse({"error": f"Unauthorized agent: {email}"}, status_code=403)
-                request.state.user = id_info  # ✅ Agent is now trusted
+                request.state.user = id_info
             except Exception as e:
                 return JSONResponse({"error": f"Invalid Bearer token: {str(e)}"}, status_code=401)
         return await call_next(request)
+
+# === Text-to-Speech (gTTS) ===
+async def text_to_speech_gtts(text: str) -> str:
+    tts = gTTS(text)
+    mp3_fp = BytesIO()
+    tts.write_to_fp(mp3_fp)
+    mp3_fp.seek(0)
+    return base64.b64encode(mp3_fp.read()).decode("utf-8")
 
 # === Agent Metadata ===
 def build_agent_card() -> AgentCard:
@@ -100,8 +111,8 @@ def build_agent_card() -> AgentCard:
         version="1.0.0",
         url=PUBLIC_URL,
         endpoint=PUBLIC_URL,
-        defaultInputModes=["text"],
-        defaultOutputModes=["text"],
+        defaultInputModes=["text", "audio"],
+        defaultOutputModes=["text", "audio"],
         capabilities=AgentCapabilities(
             a2a=True,
             toolUse=True,
@@ -119,6 +130,22 @@ def build_agent_card() -> AgentCard:
         ]
     )
 
+# === Audio Input Endpoint ===
+@app.post("/audio")
+async def handle_audio_input(request: Request, file: UploadFile = File(...)):
+    audio_bytes = await file.read()
+    transcribed_text = "show ip route"  # 🔁 Replace with actual STT logic
+    response_text = await executor.execute(transcribed_text)
+    audio_base64 = await text_to_speech_gtts(response_text)
+    return JSONResponse({
+        "message": {
+            "parts": [
+                {"kind": "text", "text": response_text},
+                {"kind": "audio", "mimeType": "audio/mp3", "data": audio_base64}
+            ]
+        }
+    })
+
 # === A2A App Setup ===
 executor = LangGraphAgentExecutor()
 request_handler = DefaultRequestHandler(
@@ -133,7 +160,8 @@ a2a_app = A2AStarletteApplication(
 
 # === Mount A2A Agent ===
 app.add_middleware(InjectBearerUserMiddleware)
-app.mount("/", a2a_app.build())
+app.mount("/a2a", a2a_app.build())
 
 if __name__ == "__main__":
-    uvicorn.run("agent.__main__:app", host=HOST, port=PORT, reload=True)
+    uvicorn.run(app, host=HOST, port=PORT, reload=True)
+
