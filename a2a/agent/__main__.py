@@ -140,7 +140,7 @@ async def handle_audio_input(request: Request, file: UploadFile = File(...)):
             parts=[{"kind": "text", "text": transcribed_text}]  # ✅ Use a plain dict here
         )
         context = RequestContext(
-            mesaage=message,
+            message=message,
             context_id=str(uuid.uuid4()),
             task_id=str(uuid.uuid4())
         )
