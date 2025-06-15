@@ -23,7 +23,7 @@ from google.auth.transport import requests as google_requests
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.tasks import InMemoryTaskStore, InMemoryPushNotifier
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.types import AgentCard, AgentCapabilities, AgentSkill, TaskState, Message
+from a2a.types import AgentCard, AgentCapabilities, AgentSkill, SendMessageRequest, Message
 from a2a.server.agent_execution import RequestContext
 
 from .agent_executor import LangGraphAgentExecutor
@@ -70,6 +70,7 @@ async def auth(request: Request):
     token = await oauth.google.authorize_access_token(request)
     user = await oauth.google.parse_id_token(request, token)
     request.session["user"] = dict(user)
+    request.session["user"]["id_token"] = token["id_token"]  # ✅ Save id_token
     return RedirectResponse(url="/")
 
 @app.get("/.well-known/agent.json")
@@ -84,94 +85,70 @@ async def agent_card():
 async def handle_audio_input(request: Request, file: UploadFile = File(...)):
     print(f"📥 Received audio upload: filename={file.filename}, content_type={file.content_type}")
     
-    # Validate file is present
     if not file or not file.filename:
-        print("❌ No file provided or empty filename")
         return JSONResponse({"error": "No file provided"}, status_code=400)
-    
+
     try:
         audio_bytes = await file.read()
-        print(f"📏 Received file size: {len(audio_bytes)} bytes")
-        
-        # Check if file is empty
         if len(audio_bytes) == 0:
-            print("❌ Received empty file")
             return JSONResponse({"error": "Empty file received"}, status_code=400)
 
         try:
-            # Try to decode with pydub
             audio = AudioSegment.from_file(BytesIO(audio_bytes))
         except Exception as decode_err:
-            print(f"❌ Failed to decode audio input with pydub: {decode_err}")
-            # Try to get more info about the file
-            print(f"🔍 File details - Name: {file.filename}, Type: {file.content_type}, Size: {len(audio_bytes)}")
             return JSONResponse({"error": f"Could not decode audio input: {str(decode_err)}"}, status_code=400)
 
-        # Convert to WAV for speech recognition
         wav_io = BytesIO()
-        try:
-            audio.export(wav_io, format="wav", parameters=["-acodec", "pcm_s16le"])
-            with open("/tmp/debug_audio.wav", "wb") as f:
-                f.write(wav_io.getbuffer())
-            print("💾 Saved /tmp/debug_audio.wav for inspection")            
-            wav_io.seek(0)
-        except Exception as export_err:
-            print(f"❌ Failed to convert audio to WAV: {export_err}")
-            return JSONResponse({"error": f"Audio conversion failed: {str(export_err)}"}, status_code=400)
+        audio.export(wav_io, format="wav", parameters=["-acodec", "pcm_s16le"])
+        wav_io.seek(0)
 
-        # Speech recognition
         recognizer = sr.Recognizer()
-        try:
-            with sr.AudioFile(wav_io) as source:
-                audio_data = recognizer.record(source)
-                transcribed_text = recognizer.recognize_google(audio_data)
-                print(f"📝 Transcription: {transcribed_text}")
-        except sr.UnknownValueError:
-            print("❌ Could not understand audio")
-            return JSONResponse({"error": "Could not understand audio"}, status_code=400)
-        except sr.RequestError as e:
-            print(f"❌ Speech recognition error: {e}")
-            return JSONResponse({"error": f"Speech recognition error: {e}"}, status_code=500)
+        with sr.AudioFile(wav_io) as source:
+            audio_data = recognizer.record(source)
+            transcribed_text = recognizer.recognize_google(audio_data)
+            print(f"📝 Transcription: {transcribed_text}")
 
-        # Process with agent
-        message = Message(
-            role="user",
-            messageId=str(uuid.uuid4()),
-            parts=[{"kind": "text", "text": transcribed_text}]  # ✅ Use a plain dict here
-        )
-        context = RequestContext(
-            context_data={"message": message},
-            context_id=str(uuid.uuid4()),
-            task_id=str(uuid.uuid4())
-        )
-        queue = Queue()
-        await executor.execute(context, queue)
+        # Format as SendMessageRequest JSON
+        text_payload = {
+            "type": "SendMessageRequest",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "messageId": str(uuid.uuid4()),
+                    "parts": [{"kind": "text", "text": transcribed_text}]
+                }
+            }
+        }
 
-        response_text = ""
-        while not queue.empty():
-            evt = await queue.get()
-            if hasattr(evt, "message") and evt.state == TaskState.completed:
-                response_text = evt.message.parts[0].text
-                break
+        headers = {}
+        user = request.session.get("user")
+        if user and "id_token" in user:
+            headers["Authorization"] = f"Bearer {user['id_token']}"
 
-        print(f"🤖 Final agent response: {response_text}")
+        # ✅ Post to A2A endpoint
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{PUBLIC_URL}/a2a/messages",
+                json=text_payload,
+                headers=headers,
+                timeout=30.0
+            )
 
         return JSONResponse({
-            "message": {
-                "role": "assistant",
-                "messageId": str(uuid.uuid4()),
-                "parts": [{"kind": "text", "text": response_text}],
-                "input_transcription": transcribed_text
-            }
+            "transcription": transcribed_text,
+            "agent_response": response.json()
         })
 
+    except sr.UnknownValueError:
+        return JSONResponse({"error": "Could not understand audio"}, status_code=400)
+    except sr.RequestError as e:
+        return JSONResponse({"error": f"Speech recognition error: {e}"}, status_code=500)
     except Exception as e:
-        print(f"❌ Unexpected error in audio processing: {e}")
         import traceback
         traceback.print_exc()
         return JSONResponse({"error": f"Audio processing error: {str(e)}"}, status_code=500)
 
-# === A2A & H2A Bearer Token Middleware ===
+# === Middleware to Inject Bearer User ===
 class InjectBearerUserMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path in ["/audio", "/.well-known/agent.json"]:
@@ -187,8 +164,6 @@ class InjectBearerUserMiddleware(BaseHTTPMiddleware):
                     GOOGLE_CLIENT_ID
                 )
                 email = id_info.get("email")
-                if not email:
-                    raise ValueError("No email in ID token")
                 if email not in TRUSTED_AGENT_EMAILS:
                     return JSONResponse({"error": f"Unauthorized agent: {email}"}, status_code=403)
                 request.state.user = id_info
@@ -225,11 +200,13 @@ def build_agent_card() -> AgentCard:
 
 # === A2A App Setup ===
 executor = LangGraphAgentExecutor()
+
 request_handler = DefaultRequestHandler(
     agent_executor=executor,
     task_store=InMemoryTaskStore(),
     push_notifier=InMemoryPushNotifier(httpx.AsyncClient()),
 )
+
 a2a_app = A2AStarletteApplication(
     agent_card=build_agent_card(),
     http_handler=request_handler,
