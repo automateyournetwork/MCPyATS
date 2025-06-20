@@ -1,5 +1,23 @@
 ---
 devices:
+  R0:
+    alias: "R0"
+    type: "router"
+    os: "iosxe"
+    platform: Cat9kv
+    credentials:
+      default:
+        username: ptcapo
+        password: 9g-y0QMgq8EOL_D
+      enable:
+        password: 9g-y0QMgq8EOL_D
+    connections:
+      cli:
+        protocol: ssh
+        ip: devnetsandboxiosxec9k.cisco.com
+        port: 22
+        arguments:
+          connection_timeout: 360
   Cat8000V:
     alias: "Always On"
     type: "router"

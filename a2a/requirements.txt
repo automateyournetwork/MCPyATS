@@ -12,3 +12,4 @@ gTTS
 python-multipart
 SpeechRecognition
 pydub
+openai

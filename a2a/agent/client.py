@@ -1,14 +1,14 @@
 import asyncio
 import os
+import sys
 import traceback
 from uuid import uuid4
 from typing import Any
 from urllib.parse import urlparse, parse_qs, urljoin
-import numpy as np
-
 import httpx
 from dotenv import load_dotenv
 from authlib.integrations.httpx_client import AsyncOAuth2Client
+from tempfile import NamedTemporaryFile
 
 from a2a.client import A2AClient
 from a2a.types import (
@@ -23,16 +23,31 @@ from a2a.types import (
 import sounddevice as sd
 from scipy.io.wavfile import write
 from pydub import AudioSegment
-from tempfile import NamedTemporaryFile
 
 # === Load environment variables ===
 load_dotenv()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://localhost/auth")
-
 AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "https://localhost")
 AGENT_CARD_PATH = "/.well-known/agent.json"
+
+# === Trigger Audio2Face ===
+async def trigger_audio2face(wav_path: str, config: str = "a2f_client/scripts/audio2face_3d_microservices_interaction_app/config/config_mark.yml"):
+    script_path = "a2f_client/scripts/audio2face_3d_microservices_interaction_app/a2f_3d.py"
+    cmd = [
+        sys.executable,
+        script_path,
+        "run_inference",
+        wav_path,
+        config,
+        "--url", os.getenv("A2F_GRPC_URL", "localhost:50051"),
+        "--skip-print-to-files"
+]
+    print("🎭 Starting A2F animation with command:", " ".join(cmd))
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await proc.communicate()
+    print("✅ Audio2Face animation complete.")
 
 # === OAuth Flow ===
 async def get_google_oauth_token() -> str:
@@ -42,22 +57,16 @@ async def get_google_oauth_token() -> str:
         redirect_uri=REDIRECT_URI,
         scope='openid email profile',
     )
-
     authorization_url, _ = oauth_client.create_authorization_url(
         'https://accounts.google.com/o/oauth2/v2/auth'
     )
     print(f"🔗 Open this URL in your browser to authorize:\n{authorization_url}")
     redirect_response = input("🔑 Paste the full redirect URL here: ").strip()
 
-    if not redirect_response.startswith("http"):
-        raise ValueError("Invalid redirect URL pasted. It should start with http or https.")
-
     parsed_redirect_query = parse_qs(urlparse(redirect_response).query)
     code = parsed_redirect_query.get("code", [None])[0]
     if not code:
-        error = parsed_redirect_query.get("error", [None])[0]
-        error_description = parsed_redirect_query.get("error_description", ["No description"])[0]
-        raise ValueError(f"❌ OAuth error: {error} - {error_description}")
+        raise ValueError("❌ OAuth code not found in response.")
 
     token = await oauth_client.fetch_token(
         url='https://oauth2.googleapis.com/token',
@@ -69,13 +78,78 @@ async def get_google_oauth_token() -> str:
     )
     return token["id_token"]
 
-# === Message helpers ===
-def create_send_message_payload(text: str, task_id: str | None = None, context_id: str | None = None) -> dict[str, Any]:
+# === Audio playback + A2F animation ===
+async def play_audio_from_url(tts_url: str):
+    try:
+        output_dir = "C:/Temp/Agent_Output"
+        os.makedirs(output_dir, exist_ok=True)
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(tts_url)
+            response.raise_for_status()
+            audio_data = response.content
+
+        with NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+            f.write(audio_data)
+            mp3_path = f.name
+
+        audio_segment = AudioSegment.from_file(mp3_path, format="mp3")
+        wav_path = os.path.join(output_dir, "latest.wav")
+        audio_segment.set_frame_rate(16000).set_channels(1).set_sample_width(2).export(wav_path, format="wav")
+
+        print(f"💾 Saved TTS .wav output to: {wav_path}")
+        print(f"🧠 Load this file manually in Audio2Face for animation.")
+
+        os.unlink(mp3_path)  # Optionally delete intermediate .mp3
+
+    except Exception as e:
+        print(f"❌ Error during saving audio: {e}")
+
+# === Audio capture and send ===
+async def record_and_send_audio(http_client: httpx.AsyncClient, agent_endpoint: str, duration_sec: int = 20):
+    fs = 16000
+    print(f"🎙️ Recording {duration_sec}s of audio...")
+    recording = sd.rec(
+        int(duration_sec * fs),
+        samplerate=fs,
+        channels=1,
+        dtype='int16',
+        device=2  # 👈 This tells it to use the Yeti GX
+    )
+    sd.wait()
+
+    with NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+        write(temp_wav.name, fs, recording)
+        wav_path = temp_wav.name
+
+    audio = AudioSegment.from_wav(wav_path)
+    with NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
+        audio.export(temp_mp3.name, format="mp3", bitrate="64k")
+        mp3_path = temp_mp3.name
+
+    try:
+        base_url = agent_endpoint.rstrip("/").removesuffix("/a2a")
+        audio_url = f"{base_url}/audio"
+        with open(mp3_path, "rb") as f:
+            files = {"file": ("voice.mp3", f, "audio/mpeg")}
+            response = await http_client.post(audio_url, files=files, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            print(f"📝 Agent response: {data.get('response_text')}")
+            if "tts_url" in data:
+                await play_audio_from_url(data["tts_url"])
+                await asyncio.sleep(1)
+    finally:
+        os.unlink(wav_path)
+        os.unlink(mp3_path)
+
+# === Agent Messaging ===
+def create_send_message_payload(text: str, task_id: str = None, context_id: str = None) -> dict[str, Any]:
     payload = {
         "message": {
             "role": "user",
             "parts": [{"kind": "text", "text": text}],
-            "messageId": uuid4().hex,
+            "messageId": uuid4().hex
         }
     }
     if task_id:
@@ -85,195 +159,63 @@ def create_send_message_payload(text: str, task_id: str | None = None, context_i
     return payload
 
 def extract_clean_text(task_data: dict[str, Any]) -> str:
-    try:
-        message_source = task_data.get("status", {}).get("message", {})
-        if task_data.get("status", {}).get("state") == "completed" and task_data.get("result", {}).get("message"):
-            message_source = task_data.get("result", {}).get("message", {})
-        parts = message_source.get("parts", [])
-        for part in parts:
-            if "text" in part:
-                return part["text"]
-        return "[⚠️ No valid text found in message parts]"
-    except Exception as e:
-        return f"[⚠️ Error extracting answer: {e} from data: {task_data}]"
+    if task_data.get("response_text"):
+        return task_data["response_text"]
+    message = task_data.get("result", {}).get("message", {})
+    parts = message.get("parts", [])
+    return next((p.get("text") for p in parts if "text" in p), "[No text found]")
 
-# === Microphone recording and upload ===
-async def record_and_send_audio(http_client: httpx.AsyncClient, agent_endpoint: str, duration_sec: int = 7):
-    print(f"🎙️ Recording {duration_sec} seconds of audio...")
-
-    try:
-        # Record audio in int16 format for direct WAV compatibility
-        fs = 16000  # Sample rate preferred for speech recognition
-        recording = sd.rec(int(duration_sec * fs), samplerate=fs, channels=1, dtype='int16')
-        sd.wait()  # Wait until recording is finished
-
-        # Save as temporary WAV file
-        with NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-            write(temp_wav.name, fs, recording)
-            wav_path = temp_wav.name
-
-        print(f"📁 Created temporary WAV file: {wav_path}")
-
-        # Convert to MP3 using pydub
-        try:
-            audio = AudioSegment.from_wav(wav_path)
-            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-
-            with NamedTemporaryFile(suffix=".mp3", delete=False) as temp_mp3:
-                audio.export(temp_mp3.name, format="mp3", bitrate="64k")
-                mp3_path = temp_mp3.name
-
-            print(f"📁 Created temporary MP3 file: {mp3_path}")
-
-            file_size = os.path.getsize(mp3_path)
-            print(f"📏 MP3 file size: {file_size} bytes")
-
-            if file_size == 0:
-                print("❌ Generated MP3 file is empty!")
-                return
-
-        except Exception as convert_err:
-            print(f"❌ Error converting audio: {convert_err}")
-            return
-
-        # Upload to server
-        print(f"🔊 Uploading MP3 to agent...")
-        base_url = agent_endpoint.rstrip("/").removesuffix("/a2a")
-        audio_url = f"{base_url}/audio"
-        print(f"🎯 Posting to: {audio_url}")
-
-        try:
-            with open(mp3_path, "rb") as f:
-                files = {"file": ("voice.mp3", f, "audio/mpeg")}
-                async with httpx.AsyncClient(timeout=60.0) as audio_client:
-                    response = await audio_client.post(audio_url, files=files)
-
-        except Exception as upload_err:
-            print(f"❌ Error during upload: {upload_err}")
-            return
-
-        # Clean up temporary files
-        try:
-            os.unlink(wav_path)
-            os.unlink(mp3_path)
-        except Exception as cleanup_err:
-            print(f"⚠️ Cleanup error: {cleanup_err}")
-
-        # Process response
-        try:
-            response.raise_for_status()
-            data = response.json()
-            message_data = data.get("message", {})
-
-            if isinstance(message_data, dict):
-                parts = message_data.get("parts", [])
-                for part in parts:
-                    if part.get("kind") == "text":
-                        response_text = part.get("text", "")
-                        print(f"📝 Agent response: {response_text}")
-                        return
-
-                response_text = message_data.get("response", "")
-                if response_text:
-                    print(f"📝 Agent response: {response_text}")
-                    return
-
-            print(f"⚠️ Unexpected response format: {data}")
-
-        except httpx.HTTPStatusError as e:
-            print(f"❌ HTTP error {e.response.status_code}: {e.response.text}")
-        except Exception as e:
-            print(f"❌ Error processing response: {e}")
-
-    except Exception as e:
-        print(f"❌ Error in record_and_send_audio: {e}")
-        traceback.print_exc()
-
-# === Chat loop ===
-async def chat_loop(client: A2AClient, raw_http_client: httpx.AsyncClient, agent_endpoint: str):
-    context_id = None
-    task_id = None
+# === Main Chat Loop ===
+async def chat_loop(client: A2AClient, http_client: httpx.AsyncClient, agent_endpoint: str):
+    context_id = task_id = None
     while True:
-        try:
-            user_input = input("\n❓ Question (or type 'mic' to use microphone): ").strip()
-            if not user_input:
-                print("👋 Exiting.")
-                break
-            if user_input.lower() == "mic":
-                await record_and_send_audio(raw_http_client, agent_endpoint)
-                continue
-            payload = create_send_message_payload(user_input, task_id, context_id)
-            request = SendMessageRequest(params=MessageSendParams(**payload))
-            print(f"🚀 Sending message to: {getattr(client, 'agent_endpoint', 'N/A')}")
-            response_model = await client.send_message(request)
-            if not isinstance(response_model, SendMessageSuccessResponse):
-                print(f"❌ Failed to send message. Response: {response_model}")
-                continue
-            task = response_model.result
-            task_id = task.id
-            context_id = getattr(task, 'contextId', context_id)
-            print(f"⏳ Task created: ID={task_id}, ContextID={context_id}. Polling for completion...")
-            for i in range(60):
+        user_input = input("\n❓ Ask something (or type 'mic'): ").strip()
+        if user_input.lower() == "mic":
+            await record_and_send_audio(http_client, agent_endpoint)
+            continue
+        if not user_input:
+            break
+        payload = create_send_message_payload(user_input, task_id, context_id)
+        request = SendMessageRequest(params=MessageSendParams(**payload))
+        response = await client.send_message(request)
+        if isinstance(response, SendMessageSuccessResponse):
+            task_id = response.result.id
+            context_id = getattr(response.result, "contextId", context_id)
+            for _ in range(60):
                 await asyncio.sleep(1)
-                task_response_model = await client.get_task(GetTaskRequest(params=TaskQueryParams(id=task_id)))
-                task_status_data = task_response_model.result
-                current_state = task_status_data.status.state
-                print(f"📡 Status (Attempt {i+1}): {current_state}")
-                if current_state == TaskState.completed:
-                    answer = extract_clean_text(task_status_data.model_dump())
+                task = await client.get_task(GetTaskRequest(params=TaskQueryParams(id=task_id)))
+                if task.result.status.state == TaskState.completed:
+                    answer = extract_clean_text(task.result.model_dump())
                     print(f"✅ Answer: {answer}")
                     break
-                elif current_state in [TaskState.failed, TaskState.cancelled]:
-                    error_message = extract_clean_text(task_status_data.model_dump())
-                    print(f"❌ Task {current_state}: {error_message}")
+                elif task.result.status.state in [TaskState.failed, TaskState.cancelled]:
+                    print(f"❌ Task failed: {task.result.status.state}")
                     break
             else:
-                print(f"⚠️ Timeout waiting for response for task {task_id}.")
-        except KeyboardInterrupt:
-            print("\n👋 Conversation ended.")
-            break
-        except Exception as e:
-            traceback.print_exc()
-            print(f"❌ Unexpected error in chat loop: {e}")
+                print("⚠️ Task polling timeout.")
+        else:
+            print("❌ Failed to send message.")
 
-# === Main logic ===
+# === Main Entry Point ===
 async def main():
-    print("🔌 Starting OAuth flow...")
     try:
-        id_token_str = await get_google_oauth_token()
-        print("✅ ID token obtained.")
-
-        headers = {"Authorization": f"Bearer {id_token_str}"}
-        async with httpx.AsyncClient(headers=headers, timeout=600.0) as http_client_session:
-            agent_card_full_url = urljoin(AGENT_BASE_URL, AGENT_CARD_PATH)
-            print(f"ℹ️ Fetching agent card from: {agent_card_full_url}")
-            agent_card_resp = await http_client_session.get(agent_card_full_url)
-            agent_card_resp.raise_for_status()
-            agent_card = agent_card_resp.json()
-            discovered_endpoint = str(agent_card.get("endpoint", "")).strip()
-            if not discovered_endpoint.startswith("http"):
-                raise ValueError(f"❌ Invalid agent endpoint in card: {discovered_endpoint}")
-            
-            print(f"🛠️ Initializing A2AClient using agent card endpoint.")
+        id_token = await get_google_oauth_token()
+        headers = {"Authorization": f"Bearer {id_token}"}
+        async with httpx.AsyncClient(headers=headers) as http_client:
+            agent_card_url = urljoin(AGENT_BASE_URL, AGENT_CARD_PATH)
+            card_resp = await http_client.get(agent_card_url)
+            card_resp.raise_for_status()
+            agent_card = card_resp.json()
+            endpoint = agent_card.get("endpoint")
             client = await A2AClient.get_client_from_agent_card_url(
-                httpx_client=http_client_session,
+                httpx_client=http_client,
                 base_url=AGENT_BASE_URL,
                 agent_card_path=AGENT_CARD_PATH
             )
-            print(f"✅ Client initialized. Effective POST endpoint: {getattr(client, 'agent_endpoint', 'unknown')}")
-            print(f"🗣️ Starting chat loop...\n")
-            await chat_loop(client, raw_http_client=http_client_session, agent_endpoint=discovered_endpoint)
-
-    except httpx.HTTPStatusError as e:
+            print("🗣️ Chat session started")
+            await chat_loop(client, http_client, endpoint)
+    except Exception:
         traceback.print_exc()
-        print(f"❌ HTTP error: {e.response.status_code} - {e.response.text}")
-        print(f"Request was to: {e.request.url}")
-    except ValueError as e:
-        traceback.print_exc()
-        print(f"❌ Configuration or Value Error: {e}")
-    except Exception as e:
-        traceback.print_exc()
-        print(f"❌ Failed during client setup or communication: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
