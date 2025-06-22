@@ -6,10 +6,10 @@ WORKDIR /app
 
 RUN pip install requests
 RUN pip install streamlit
+RUN pip install streamlit-advanced-audio
 RUN pip install httpx
 RUN pip install dotenv
 RUN pip install scipy
-RUN pip install matplotlib
 RUN pip install pydub
 RUN pip install soundfile
 RUN pip install google-auth
