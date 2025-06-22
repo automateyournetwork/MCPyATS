@@ -12,6 +12,7 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 import asyncio
 import socket
 from streamlit_advanced_audio import audix, WaveSurferOptions
+import streamlit.components.v1 as components
 
 # === ENV ===
 load_dotenv()
@@ -79,6 +80,114 @@ if st.session_state["auth_success"] and not st.session_state["id_token"]:
 
 # === Authenticated Page ===
 st.title("🎤 Talk To Your Network")
+
+# === 3D GLB AI Face ===
+st.subheader("🧠 AI Agent Avatar")
+model_url = "https://www.automateyournetwork.ca/avatar/capo.glb"
+html_content = f'''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js GLTF Model</title>
+    <style>
+        body {{ margin: 0; }}
+        canvas {{ display: block; }}
+        #three-container {{ width: 100vw; height: 100vh; }}
+    </style>
+    <script type="importmap">
+    {{
+        "imports": {{
+        "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
+        "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/"
+        }}
+    }}
+    </script>
+</head>
+<body>
+    <div id="three-container"></div>
+    <script type="module">
+        import * as THREE from 'three';
+        import {{ OrbitControls }} from 'three/examples/jsm/controls/OrbitControls.js';
+        import {{ GLTFLoader }} from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+        let camera, scene, renderer;
+
+        function init() {{
+            const container = document.getElementById('three-container');
+
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.25, 20);
+            camera.position.set(1, 0.9, 1);
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x222233); // Set a dark background
+
+            // Add lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            renderer = new THREE.WebGLRenderer({{ antialias: true }});
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.appendChild(renderer.domElement);
+
+            const controls = new OrbitControls(camera, renderer.domElement);
+            controls.addEventListener('change', render);
+            controls.maxDistance = 10;
+            controls.target.set(0, 0, -0.2);
+            controls.update();
+
+            const loader = new GLTFLoader();
+            loader.load('{model_url}', function (gltf) {{
+                const model = gltf.scene;
+                // Center and scale camera to fit model
+                const box = new THREE.Box3().setFromObject(model);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                model.position.sub(center); // Center the model at origin
+
+                // Adjust camera distance based on model size
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const fov = camera.fov * (Math.PI / 180);
+                let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
+                cameraZ *= 1.5; // Add some padding
+                camera.position.set(0, 0, cameraZ);
+                camera.lookAt(0, 0, 0);
+
+                scene.add(model);
+                render();
+            }}, undefined, function (error) {{
+                console.error('An error happened:', error);
+            }});
+
+            window.addEventListener('resize', onWindowResize);
+            render();
+        }}
+
+        function onWindowResize() {{
+            const container = document.getElementById('three-container');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            render();
+        }}
+
+        function render() {{
+            renderer.render(scene, camera);
+        }}
+
+        init();
+    </script>
+</body>
+</html>
+'''
+components.html(html_content, height=600)
 
 # === Text Input ===
 st.subheader("💬 Or type your message:")
@@ -156,5 +265,7 @@ if audio_value:
                             st.warning("🗣️ You asked (via voice)")         
                         st.success(f"✅ Agent response: {data.get('response_text')}")                            
     except Exception as e:
+        st.error(f"❌ Error: {e}")
+        st.error(traceback.format_exc())
         st.error(f"❌ Error: {e}")
         st.error(traceback.format_exc())
