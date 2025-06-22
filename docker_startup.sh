@@ -107,10 +107,10 @@ echo "Building a2a image..."
 docker build -t a2a ./a2a
 echo "a2a image built successfully"
 
-# echo "Building streamlit-app image..."
-# docker build -t streamlit-app ./streamlit
-# if [ $? -ne 0 ]; then echo "Error building streamlit-app image."; exit 1; fi
-# echo "streamlit-app image built successfully."
+echo "Building streamlit-app image..."
+docker build -t streamlit-app ./streamlit
+if [ $? -ne 0 ]; then echo "Error building streamlit-app image."; exit 1; fi
+echo "streamlit-app image built successfully."
 
 echo "Building langgraph container (mcpyats)..."
 docker build -t mcpyats -f ./mcpyats/Dockerfile ./mcpyats
@@ -133,9 +133,6 @@ echo "mcpyats image built successfully."
 # docker build -t aci-mcp ./mcp_servers/aci_mcp
 # echo "local aci-mcp image built successfully."
 
-echo "Building blender-lipsync container..."
-docker build -t blender-lipsync ./blender
-echo "blender-lipsync image built successfully."
 
 #######
 #     #
@@ -262,7 +259,7 @@ docker run -p 10000:10000 \
   --add-host=host.docker.internal:host-gateway \
   --env-file .env \
   -e LANGGRAPH_URL=http://host.docker.internal:2024 \
-  -e PUBLIC_BASE_URL=https://d4a3-142-120-176-100.ngrok-free.app \
+  -e PUBLIC_BASE_URL=https://e403-70-53-207-82.ngrok-free.app \
   -v $(pwd)/a2a:/a2a \
   -v /home/johncapobianco/MCPyATS/shared_output:/output \
   a2a
@@ -277,9 +274,9 @@ docker run -dit \
   mcpyats
 echo "mcpyats container started."
 
-# echo "Starting streamlit-app container..."
-# docker run -d --name streamlit-app -p 8501:8501 streamlit-app
-# echo "streamlit-app container started at http://localhost:8501"
+echo "Starting streamlit-app container..."
+docker run -d --name streamlit-app -p 8501:8501 --env-file .env --dns 8.8.8.8 streamlit-app
+echo "streamlit-app container started at http://localhost:8501"
 
 # echo "Starting local drawio container..."
 # docker run -d -p 8080:80 --name drawio-local drawio

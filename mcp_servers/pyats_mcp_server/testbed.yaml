@@ -1,7 +1,7 @@
 ---
 devices:
-  R0:
-    alias: "R0"
+  r0:
+    alias: "r0"
     type: "router"
     os: "iosxe"
     platform: Cat9kv
