@@ -105,7 +105,7 @@ html_content = f'''
     }}
     </script>
 </head>
-<body>
+<body id="avatar-body">
     <div id="three-container"></div>
     <script type="module">
         import * as THREE from 'three';
@@ -114,6 +114,30 @@ html_content = f'''
 
         let camera, scene, renderer;
 
+        let model;
+
+        function startModelSpin() {{
+            if (!model) return;
+            let t = 0;
+            const spinDuration = 2000; // spin for 2 seconds
+            const start = performance.now();
+            function spinStep(now) {{
+                const elapsed = now - start;
+                if (elapsed < spinDuration) {{
+                    model.rotation.y += 0.05;
+                    requestAnimationFrame(spinStep);
+                }}
+            }}
+            requestAnimationFrame(spinStep);
+        }}
+
+        window.addEventListener("message", (event) => {{
+            if (event.data && event.data.type === "AUDIO_PLAYBACK_STARTED") {{
+                console.log("🔄 Received AUDIO_PLAYBACK_STARTED → spinning head!");
+                startModelSpin();
+            }}
+        }});
+
         function init() {{
             const container = document.getElementById('three-container');
 
@@ -121,9 +145,8 @@ html_content = f'''
             camera.position.set(1, 0.9, 1);
 
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x222233); // Set a dark background
+            scene.background = new THREE.Color(0x222233);
 
-            // Add lights
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
             scene.add(ambientLight);
             const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -143,20 +166,18 @@ html_content = f'''
 
             const loader = new GLTFLoader();
             loader.load('{model_url}', function (gltf) {{
-                const model = gltf.scene;
-                // Center and scale camera to fit model
+                model = gltf.scene;
                 const box = new THREE.Box3().setFromObject(model);
                 const size = new THREE.Vector3();
                 box.getSize(size);
                 const center = new THREE.Vector3();
                 box.getCenter(center);
-                model.position.sub(center); // Center the model at origin
+                model.position.sub(center);
 
-                // Adjust camera distance based on model size
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const fov = camera.fov * (Math.PI / 180);
                 let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-                cameraZ *= 1.5; // Add some padding
+                cameraZ *= 1.5;
                 camera.position.set(0, 0, cameraZ);
                 camera.lookAt(0, 0, 0);
 
@@ -168,7 +189,7 @@ html_content = f'''
 
             window.addEventListener('resize', onWindowResize);
             render();
-        }}
+        }}     
 
         function onWindowResize() {{
             const container = document.getElementById('three-container');
@@ -221,7 +242,7 @@ if text_prompt:
 # === Mic Input ===
 st.subheader("🎤 Or record your question:")
 audio_value = st.audio_input("Record a voice message")
-if audio_value:
+if audio_value and not st.session_state.get("ai_response_ready", False):
     st.audio(audio_value)
     with NamedTemporaryFile(delete=False, suffix=".wav") as f:
         f.write(audio_value.getvalue())
@@ -253,19 +274,61 @@ if audio_value:
                             mp3_path = f.name
                         wav_path = mp3_path + ".wav"
                         AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
-                        options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
-                        result = audix(wav_path, wavesurfer_options=options)
-                        if result:
-                            st.write(f"▶️ Current Time: {result['currentTime']}s")
-                            if result['selectedRegion']:
-                                st.write(f"🔍 Selected: {result['selectedRegion']['start']} - {result['selectedRegion']['end']}s")
-                        if "transcription" in data:
-                            st.warning(f"🗣️ You asked: {data['transcription']}")
-                        else:
-                            st.warning("🗣️ You asked (via voice)")         
-                        st.success(f"✅ Agent response: {data.get('response_text')}")                            
+
+                        # Save to session to avoid reruns
+                        st.session_state["ai_response_ready"] = True
+                        st.session_state["tts_wav_path"] = wav_path
+                        st.session_state["agent_text_response"] = data.get("response_text")
+                        st.session_state["agent_transcription"] = data.get("transcription", "You asked (via voice)")
     except Exception as e:
         st.error(f"❌ Error: {e}")
         st.error(traceback.format_exc())
-        st.error(f"❌ Error: {e}")
-        st.error(traceback.format_exc())
+
+if st.session_state.get("ai_response_ready"):
+    st.subheader("✅ Agent's Answer")   
+    wav_path = st.session_state["tts_wav_path"]
+    options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
+    result = audix(wav_path, wavesurfer_options=options)
+
+    components.html(f"""
+    <script>
+        setTimeout(() => {{
+            const waveform = document.querySelector('canvas');  // audix renders a canvas
+    
+            let realAudio = document.getElementById('hidden-native-audio');
+            if (!realAudio) {{
+                realAudio = document.createElement('audio');
+                realAudio.id = 'hidden-native-audio';
+                realAudio.src = "{st.session_state['tts_wav_path']}";
+                realAudio.style.display = 'none';
+                document.body.appendChild(realAudio);
+            }}
+    
+            realAudio.addEventListener("play", () => {{
+                // Find the iframe that hosts the avatar
+                const iframes = parent.document.querySelectorAll("iframe");
+                for (const iframe of iframes) {{
+                    if (iframe.src.includes("Three.js") || iframe.contentWindow?.postMessage) {{
+                        iframe.contentWindow.postMessage({{ type: "AUDIO_PLAYBACK_STARTED" }}, "*");
+                        console.log("📨 Sent AUDIO_PLAYBACK_STARTED to avatar iframe");
+                    }}
+                }}
+            }});
+    
+            if (waveform) {{
+                waveform.addEventListener("click", () => {{
+                    realAudio.play().catch(err => console.warn("Audio play error", err));
+                }});
+            }}
+        }}, 1000);
+    </script>
+    """, height=0)
+
+    st.warning(f"User: {st.session_state.get('agent_transcription')}")
+    st.success(st.session_state.get("agent_text_response", ""))
+    
+    if result:
+        st.write(f"▶️ Current Time: {result['currentTime']}s")
+        if result['selectedRegion']:
+            st.write(f"🔍 Selected: {result['selectedRegion']['start']} - {result['selectedRegion']['end']}s")
+
