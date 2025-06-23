@@ -113,18 +113,18 @@ html_content = f'''
         import {{ GLTFLoader }} from 'three/examples/jsm/loaders/GLTFLoader.js';
 
         let camera, scene, renderer;
-
         let model;
 
         function startModelSpin() {{
             if (!model) return;
             let t = 0;
-            const spinDuration = 2000; // spin for 2 seconds
+            const spinDuration = 2000;
             const start = performance.now();
             function spinStep(now) {{
                 const elapsed = now - start;
                 if (elapsed < spinDuration) {{
                     model.rotation.y += 0.05;
+                    render(); // <-- Ensure we re-render after rotation
                     requestAnimationFrame(spinStep);
                 }}
             }}
@@ -134,6 +134,10 @@ html_content = f'''
         window.addEventListener("message", (event) => {{
             if (event.data && event.data.type === "AUDIO_PLAYBACK_STARTED") {{
                 console.log("🔄 Received AUDIO_PLAYBACK_STARTED → spinning head!");
+                startModelSpin();
+            }}
+            if (event.data && event.data.type === "MIC_RECORDING_STARTED") {{
+                console.log("🎙️ Received MIC_RECORDING_STARTED → spinning head!");
                 startModelSpin();
             }}
         }});
@@ -239,10 +243,35 @@ if text_prompt:
         st.error(f"❌ Error: {e}")
         st.error(traceback.format_exc())
 
+def trigger_avatar_animation(event_type):
+    st.components.v1.html(f"""
+    <script>
+        function findAvatarIframe() {{
+            const iframes = Array.from(parent.document.querySelectorAll('iframe'));
+            return iframes.find(iframe => (
+                iframe.contentWindow &&
+                iframe.contentWindow.document &&
+                iframe.contentWindow.document.getElementById('three-container')
+            ));
+        }}
+        function sendAnimationEvent() {{
+            const avatarIframe = findAvatarIframe();
+            if (avatarIframe) {{
+                avatarIframe.contentWindow.postMessage({{ type: "{event_type}" }}, "*");
+                console.log("Sent {event_type} to avatar iframe");
+            }} else {{
+                setTimeout(sendAnimationEvent, 500);
+            }}
+        }}
+        sendAnimationEvent();
+    </script>
+    """, height=0)
+
 # === Mic Input ===
 st.subheader("🎤 Or record your question:")
 audio_value = st.audio_input("Record a voice message")
 if audio_value and not st.session_state.get("ai_response_ready", False):
+    trigger_avatar_animation("MIC_RECORDING_STARTED")
     st.audio(audio_value)
     with NamedTemporaryFile(delete=False, suffix=".wav") as f:
         f.write(audio_value.getvalue())
@@ -284,10 +313,12 @@ if audio_value and not st.session_state.get("ai_response_ready", False):
         st.error(f"❌ Error: {e}")
         st.error(traceback.format_exc())
 
+# === Agent Response Display ===
 if st.session_state.get("ai_response_ready"):
     st.subheader("✅ Agent's Answer")   
     wav_path = st.session_state["tts_wav_path"]
     options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
+    trigger_avatar_animation("AUDIO_PLAYBACK_STARTED")
     result = audix(wav_path, wavesurfer_options=options)
 
     components.html(f"""

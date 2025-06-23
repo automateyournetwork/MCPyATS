@@ -7,6 +7,7 @@ WORKDIR /app
 RUN pip install requests
 RUN pip install streamlit
 RUN pip install streamlit-advanced-audio
+RUN pip install streamlit-3d
 RUN pip install httpx
 RUN pip install dotenv
 RUN pip install scipy
@@ -14,6 +15,7 @@ RUN pip install pydub
 RUN pip install soundfile
 RUN pip install google-auth
 RUN pip install authlib
+
 
 # Add ffmpeg
 RUN apt-get update && \
