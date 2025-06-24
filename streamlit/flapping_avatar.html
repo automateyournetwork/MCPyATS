@@ -1,269 +1,449 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flapping Avatar</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #111; }
-        canvas { display: block; }
-        #three-container { width: 100vw; height: 100vh; }
-    </style>
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
-            "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/"
-        }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Flapping Avatar</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #111; }
+    canvas { display: block; }
+    #three-container { width: 100vw; height: 100vh; }
+    #debug { 
+      position: absolute; 
+      top: 10px; 
+      left: 10px; 
+      color: white; 
+      font-family: monospace; 
+      font-size: 12px;
+      background: rgba(0,0,0,0.7);
+      padding: 5px;
+      border-radius: 3px;
+      z-index: 1000;
     }
-    </script>
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
+      "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
-    <div id="three-container"></div>
-    <script type="module">
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-        import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-            
-        let camera, scene, renderer, topHalf, bottomHalf, controls, flapInterval;
-            
-        function flapMouthStart() {
-            let distance = 0;
-            let opening = true;
-            clearInterval(flapInterval);
-            flapInterval = setInterval(() => {
-                if (!bottomHalf || !topHalf) return;
-                if (opening) {
-                    distance += 0.01;
-                    if (distance >= 0.3) opening = false; // Max separation
-                } else {
-                    distance -= 0.01;
-                    if (distance <= 0) opening = true;
-                }
-                // Move halves vertically up and down
-                topHalf.position.y = distance;
-                bottomHalf.position.y = -distance;
-                render();
-            }, 33); // ~30fps
+  <div id="debug">Waiting for audio...</div>
+  <div id="three-container"></div>
+  <script type="module">
+    window.addEventListener("message", e => console.log("🛰️ RECEIVED POSTMESSAGE", e.data));
+
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+    let camera, scene, renderer, topHalf, bottomHalf, controls;
+    let audioCtx, analyser, dataArray, audioSource, audioElement;
+    let animationId;
+    let isAnimating = false;
+    let flapIntensity = 0;
+    
+    const debug = document.getElementById('debug');
+
+    function log(message) {
+      console.log(message);
+      debug.textContent = message;
+    }
+
+    // Fallback animation when audio analysis fails
+    function startFallbackAnimation() {
+      if (isAnimating) return;
+      isAnimating = true;
+      log("🎭 Starting fallback animation");
+      
+      const startTime = Date.now();
+      const duration = 3000; // 3 seconds of animation
+      
+      function animate() {
+        if (!isAnimating) return;
+        
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Create a flapping pattern
+        const flapSpeed = 8; // flaps per second
+        const flapPattern = Math.sin(elapsed * flapSpeed * Math.PI / 1000);
+        const intensity = 0.15 * (1 - progress * 0.7); // fade out over time
+        
+        if (topHalf && bottomHalf) {
+          const distance = Math.abs(flapPattern) * intensity;
+          topHalf.position.y = Math.max(0.01, distance);
+          bottomHalf.position.y = Math.min(-0.01, -distance);
+          render();
         }
         
-        function flapMouthStop() {
-            clearInterval(flapInterval);
-            if (bottomHalf && topHalf) {
-                bottomHalf.position.y = -0.01;
-                topHalf.position.y = 0.01;
-                render();
-            }
+        if (progress < 1) {
+          animationId = requestAnimationFrame(animate);
+        } else {
+          stopAnimation();
+        }
+      }
+      
+      animate();
+    }
+
+    function startAudioAnalysisAnimation(audioUrl) {
+      if (isAnimating) stopAnimation();
+      
+      try {
+        log("🎵 Attempting audio analysis...");
+        
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
         
-        window.addEventListener("message", (event) => {
-            if (event.data?.type === "AUDIO_PLAYBACK_STARTED") {
-                flapMouthStart();
-                setTimeout(() => flapMouthStop(), event.data.duration || 15000);
-            }
+        // Resume audio context if needed
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().then(() => {
+            log("🔊 Audio context resumed");
+          });
+        }
+
+        audioElement = new Audio();
+        audioElement.preload = "auto";
+        
+        audioElement.addEventListener('loadstart', () => log("📥 Loading audio..."));
+        audioElement.addEventListener('canplaythrough', () => log("✅ Audio ready"));
+        audioElement.addEventListener('play', () => log("▶️ Audio started"));
+        
+        audioElement.addEventListener('error', (e) => {
+          log("❌ Audio error, using fallback");
+          startFallbackAnimation();
         });
+
+        audioElement.addEventListener('play', () => {
+          try {
+            audioSource = audioCtx.createMediaElementSource(audioElement);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.7;
         
-        // MODIFIED createCleanSplit FUNCTION
-        function createCleanSplit(geometry, splitY, keepTop) {
-            const newGeometry = new THREE.BufferGeometry();
-            const positions = geometry.attributes.position.array;
-            const normals = geometry.attributes.normal ? geometry.attributes.normal.array : null;
-            const uvs = geometry.attributes.uv ? geometry.attributes.uv.array : null;
-            const colors = geometry.attributes.color ? geometry.attributes.color.array : null;
-            const indices = geometry.index ? geometry.index.array : Array.from({ length: positions.length / 3 }, (_, i) => i);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            audioSource.connect(analyser);
+            analyser.connect(audioCtx.destination);
         
-            const newPositions = [];
-            const newNormals = [];
-            const newUvs = [];
-            const newColors = [];
-            const newIndices = [];
+            isAnimating = true;
+            log("🎤 Audio analysis active");
+            animateWithAudio();
+          } catch (err) {
+            log("❌ Audio analysis failed, using fallback");
+            startFallbackAnimation();
+          }
+        });
+
+        audioElement.src = audioUrl;
+        audioElement.play().catch(() => {
+          log("❌ Play failed, using fallback");
+          startFallbackAnimation();
+        });
+
+        audioElement.onended = () => {
+          log("🏁 Audio ended");
+          stopAnimation();
+        };
+
+      } catch (error) {
+        log("❌ Audio init failed, using fallback");
+        startFallbackAnimation();
+      }
+    }
+
+    function animateWithAudio() {
+      if (!isAnimating || !analyser) return;
+
+      analyser.getByteFrequencyData(dataArray);
+
+      // Focus on bins that cover ~300–3000 Hz for human voice
+      const voiceBins = dataArray.slice(2, 40); // tweak as needed
+      const avg = voiceBins.reduce((sum, val) => sum + val, 0) / voiceBins.length;
+
+      // Normalize to 0–1
+      let volume = avg / 255;
+
+      // Noise gate to skip low ambient noise
+      const noiseThreshold = 0.1;
+      volume = volume < noiseThreshold ? 0 : (volume - noiseThreshold) / (1 - noiseThreshold);
+
+      // Smooth volume changes
+      flapIntensity += (volume - flapIntensity) * 0.3;
+
+      if (topHalf && bottomHalf) {
+        const distance = flapIntensity * 0.4; // scaling for realism
+        topHalf.position.y = Math.max(0.01, distance);
+        bottomHalf.position.y = Math.min(-0.01, -distance);
+        render();
+      }
+
+      animationId = requestAnimationFrame(animateWithAudio);
+    }
+
+    function stopAnimation() {
+      isAnimating = false;
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+      
+      if (audioElement) {
+        audioElement.pause();
+        audioElement = null;
+      }
+      
+      // Reset positions
+      if (topHalf && bottomHalf) {
+        topHalf.position.y = 0.01;
+        bottomHalf.position.y = -0.01;
+        render();
+      }
+      
+      flapIntensity = 0;
+      log("🛑 Animation stopped");
+    }
+
+    // Enhanced message listener
+    window.addEventListener("message", (event) => {
+      log(`📨 Message: ${JSON.stringify(event.data)}`);
+      
+      if (event.data?.type === "AUDIO_PLAYBACK_STARTED" && event.data.audioUrl) {
+        startAudioAnalysisAnimation(event.data.audioUrl);
+      } else if (event.data?.type === "START_FLAPPING") {
+        startFallbackAnimation();
+      } else if (event.data?.type === "STOP_FLAPPING") {
+        stopAnimation();
+      }
+    });
+
+    // Multiple detection strategies for Streamlit audio
+    function hookIntoStreamlitAudio() {
+      try {
+        // Strategy 1: Direct iframe parent access
+        const parentAudio = parent.document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
+        if (parentAudio && !parentAudio.dataset.hooked) {
+          parentAudio.dataset.hooked = "true";
+          log("🔗 Hooked into parent audio");
+          
+          parentAudio.addEventListener('play', () => {
+            log("🔊 Parent audio play detected");
+            startFallbackAnimation(); // Use fallback since we can't analyze cross-origin
+          });
+          
+          parentAudio.addEventListener('ended', () => {
+            log("🔇 Parent audio ended");
+            stopAnimation();
+          });
+        }
         
-            const vertexMap = new Map(); // Maps original vertex index to new vertex index
-            let newVertexIndex = 0;
+        // Strategy 2: Check for audio in current document
+        const localAudio = document.querySelector('audio');
+        if (localAudio && !localAudio.dataset.hooked) {
+          localAudio.dataset.hooked = "true";
+          log("🔗 Hooked into local audio");
+          
+          localAudio.addEventListener('play', () => {
+            log("🔊 Local audio play detected");
+            if (localAudio.src) {
+              startAudioAnalysisAnimation(localAudio.src);
+            } else {
+              startFallbackAnimation();
+            }
+          });
+        }
         
-            for (let i = 0; i < indices.length; i += 3) {
-                const iA = indices[i];
-                const iB = indices[i + 1];
-                const iC = indices[i + 2];
-            
-                const yA = positions[iA * 3 + 1];
-                const yB = positions[iB * 3 + 1];
-                const yC = positions[iC * 3 + 1];
-            
-                let triangleKeepCount = 0;
-                if ((keepTop && yA >= splitY) || (!keepTop && yA <= splitY)) triangleKeepCount++;
-                if ((keepTop && yB >= splitY) || (!keepTop && yB <= splitY)) triangleKeepCount++;
-                if ((keepTop && yC >= splitY) || (!keepTop && yC <= splitY)) triangleKeepCount++;
-            
-                // Only keep the triangle if all its vertices are on the "keep" side of the split line
-                // This is a simple approach and will cut off triangles crossing the split line.
-                // For a perfectly clean cut, you'd need to generate new vertices along the split line,
-                // which is significantly more complex.
-                if (triangleKeepCount === 3) {
-                    [iA, iB, iC].forEach(originalIndex => {
-                        if (!vertexMap.has(originalIndex)) {
-                            vertexMap.set(originalIndex, newVertexIndex);
-                            newPositions.push(positions[originalIndex * 3], positions[originalIndex * 3 + 1], positions[originalIndex * 3 + 2]);
-                            if (normals) newNormals.push(normals[originalIndex * 3], normals[originalIndex * 3 + 1], normals[originalIndex * 3 + 2]);
-                            if (uvs) newUvs.push(uvs[originalIndex * 2], uvs[originalIndex * 2 + 1]);
-                            if (colors) newColors.push(colors[originalIndex * 3], colors[originalIndex * 3 + 1], colors[originalIndex * 3 + 2]);
-                            newVertexIndex++;
-                        }
-                        newIndices.push(vertexMap.get(originalIndex));
-                    });
+      } catch (e) {
+        // Cross-origin restrictions
+        log("⚠️ Cross-origin audio detection limited");
+      }
+    }
+
+    function createCleanSplit(geometry, splitY, keepTop) {
+      const newGeometry = new THREE.BufferGeometry();
+      const positions = geometry.attributes.position.array;
+      const normals = geometry.attributes.normal?.array;
+      const uvs = geometry.attributes.uv?.array;
+      const colors = geometry.attributes.color?.array;
+      const indices = geometry.index ? geometry.index.array : Array.from({ length: positions.length / 3 }, (_, i) => i);
+
+      const newPositions = [], newNormals = [], newUvs = [], newColors = [], newIndices = [];
+      const vertexMap = new Map();
+      let newVertexIndex = 0;
+
+      for (let i = 0; i < indices.length; i += 3) {
+        const iA = indices[i], iB = indices[i + 1], iC = indices[i + 2];
+        const yA = positions[iA * 3 + 1], yB = positions[iB * 3 + 1], yC = positions[iC * 3 + 1];
+
+        let triangleKeepCount = 0;
+        if ((keepTop && yA >= splitY) || (!keepTop && yA <= splitY)) triangleKeepCount++;
+        if ((keepTop && yB >= splitY) || (!keepTop && yB <= splitY)) triangleKeepCount++;
+        if ((keepTop && yC >= splitY) || (!keepTop && yC <= splitY)) triangleKeepCount++;
+
+        if (triangleKeepCount === 3) {
+          [iA, iB, iC].forEach(originalIndex => {
+            if (!vertexMap.has(originalIndex)) {
+              vertexMap.set(originalIndex, newVertexIndex++);
+              newPositions.push(positions[originalIndex * 3], positions[originalIndex * 3 + 1], positions[originalIndex * 3 + 2]);
+              if (normals) newNormals.push(normals[originalIndex * 3], normals[originalIndex * 3 + 1], normals[originalIndex * 3 + 2]);
+              if (uvs) newUvs.push(uvs[originalIndex * 2], uvs[originalIndex * 2 + 1]);
+              if (colors) newColors.push(colors[originalIndex * 3], colors[originalIndex * 3 + 1], colors[originalIndex * 3 + 2]);
+            }
+            newIndices.push(vertexMap.get(originalIndex));
+          });
+        }
+      }
+
+      if (newPositions.length === 0) return new THREE.BufferGeometry();
+      newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
+      if (normals && newNormals.length) newGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(newNormals, 3));
+      if (uvs && newUvs.length) newGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(newUvs, 2));
+      if (colors && newColors.length) newGeometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
+      newGeometry.setIndex(newIndices);
+      newGeometry.computeVertexNormals();
+      return newGeometry;
+    }
+
+    function init() {
+      const container = document.getElementById('three-container');
+      camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+      camera.position.set(0, 0, 4.5);
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      const light = new THREE.DirectionalLight(0xffffff, 1);
+      light.position.set(2, 3, 2);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0x999999));
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 1, 0);
+      controls.enableDamping = true;
+      controls.update();
+
+      const loader = new GLTFLoader();
+      
+      // Replace with your actual model URL
+      const modelUrl = "{{MODEL_URL}}"; // You'll need to replace this
+      
+      loader.load(modelUrl, (gltf) => {
+        log("📦 Model loaded");
+        const model = gltf.scene;
+        const box = new THREE.Box3().setFromObject(model);
+        const splitY = box.min.y + (box.max.y - box.min.y) * 0.6;
+
+        topHalf = new THREE.Group();
+        bottomHalf = new THREE.Group();
+
+        model.traverse((child) => {
+          if (child.isMesh) {
+            const childBox = new THREE.Box3().setFromObject(child);
+            if (childBox.max.y < splitY - 0.1 || childBox.min.y > splitY + 0.1) return;
+
+            let hasBodyColor = false;
+            if (child.material?.color) {
+              const c = child.material.color;
+              if (c.b > c.r && c.b > c.g && c.b > 0.5) hasBodyColor = true;
+            }
+
+            if (Array.isArray(child.material)) {
+              child.material.forEach(mat => {
+                if (mat.color) {
+                  const c = mat.color;
+                  if (c.b > c.r && c.b > c.g && c.b > 0.5) hasBodyColor = true;
                 }
+              });
             }
-        
-            if (newPositions.length === 0) {
-                return new THREE.BufferGeometry(); // Return empty if no vertices are kept
+
+            if (hasBodyColor) {
+              const cloneMat = Array.isArray(child.material) ? child.material.map(m => m.clone()) : child.material.clone();
+              const clone = new THREE.Mesh(child.geometry, cloneMat);
+              clone.position.copy(child.position);
+              clone.rotation.copy(child.rotation);
+              clone.scale.copy(child.scale);
+              scene.add(clone);
+              return;
             }
-        
-            newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
-            if (normals && newNormals.length > 0) newGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(newNormals, 3));
-            if (uvs && newUvs.length > 0) newGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(newUvs, 2));
-            if (colors && newColors.length > 0) newGeometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
-            newGeometry.setIndex(newIndices);
-        
-            newGeometry.computeVertexNormals(); // Recalculate normals for the new geometry
-            return newGeometry;
-        }
-        
-        
-        function init() {
-            const container = document.getElementById('three-container');
-        
-            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
-            camera.position.set(0, 1.5, 3);
-        
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x111111);
-        
-            const light = new THREE.DirectionalLight(0xffffff, 1);
-            light.position.set(2, 3, 2);
-            scene.add(light);
-        
-            const ambient = new THREE.AmbientLight(0x999999);
-            scene.add(ambient);
-        
-            renderer = new THREE.WebGLRenderer({ antialias: true });
-            renderer.setSize(container.clientWidth, container.clientHeight);
-            container.appendChild(renderer.domElement);
-        
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.target.set(0, 1, 0);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-            controls.enableZoom = true;
-            controls.enableRotate = true;
-            controls.enablePan = true;
-            controls.update();
-        
-            const loader = new GLTFLoader();
-            loader.load("{{MODEL_URL}}", (gltf) => {
-                const model = gltf.scene;
-                const box = new THREE.Box3().setFromObject(model);
-                const center = new THREE.Vector3();
-                box.getCenter(center);
-                model.position.sub(center);
-            
-                const splitY = box.min.y + (box.max.y - box.min.y) * 0.6;
-                const gap = 0.01;
-            
-                topHalf = new THREE.Group();
-                bottomHalf = new THREE.Group();
-            
-                model.traverse((child) => {
-                    if (child.isMesh) {
-                        const childBox = new THREE.Box3().setFromObject(child);
-                    
-                        if (childBox.max.y < splitY - 0.1 || childBox.min.y > splitY + 0.1) {
-                            return;
-                        }
-                    
-                        let hasBodyColor = false;
-                        if (child.material && child.material.color) {
-                            const color = child.material.color;
-                            if (color.b > color.r && color.b > color.g && color.b > 0.5) {
-                                hasBodyColor = true;
-                            }
-                        }
-                        if (Array.isArray(child.material)) {
-                            child.material.forEach(mat => {
-                                if (mat.color) {
-                                    const color = mat.color;
-                                    if (color.b > color.r && color.b > color.g && color.b > 0.5) {
-                                        hasBodyColor = true;
-                                    }
-                                }
-                            });
-                        }
-                        
-                        if (hasBodyColor) {
-                            // For body/shirt, add the whole mesh to both halves initially,
-                            // and let the flapMouth function handle the movement or hide as needed.
-                            // Or, simply add it to the scene once if it shouldn't flap.
-                            // For now, let's skip splitting these parts if they aren't part of the mouth.
-                            // If you want the body to stay still, add it directly to the scene.
-                            const cloneMaterial = Array.isArray(child.material) ? 
-                                child.material.map(m => m.clone()) : 
-                                child.material.clone();
-                            const cloneMesh = new THREE.Mesh(child.geometry, cloneMaterial);
-                            cloneMesh.position.copy(child.position);
-                            cloneMesh.rotation.copy(child.rotation);
-                            cloneMesh.scale.copy(child.scale);
-                            scene.add(cloneMesh); // Add full body/shirt to scene
-                            return; // Skip splitting this mesh
-                        }
-                        
-                        const topGeometry = createCleanSplit(child.geometry, splitY, true);
-                        const topMaterial = Array.isArray(child.material) ? 
-                            child.material.map(m => m.clone()) : 
-                            child.material.clone();
-                        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-                        topMesh.position.copy(child.position);
-                        topMesh.rotation.copy(child.rotation);
-                        topMesh.scale.copy(child.scale);
-                        topHalf.add(topMesh);
-                        
-                        const bottomGeometry = createCleanSplit(child.geometry, splitY, false);
-                        const bottomMaterial = Array.isArray(child.material) ? 
-                            child.material.map(m => m.clone()) : 
-                            child.material.clone();
-                        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
-                        bottomMesh.position.copy(child.position);
-                        bottomMesh.rotation.copy(child.rotation);
-                        bottomMesh.scale.copy(child.scale);
-                        bottomHalf.add(bottomMesh);
-                    }
-                });
-            
-                topHalf.position.y = 0.01;
-                bottomHalf.position.y = -0.01;
-            
-                const group = new THREE.Group();
-                group.add(topHalf);
-                group.add(bottomHalf);
-                scene.add(group);
-            
-                controls.target.set(0, 1, 0);
-                controls.update();
-                render();
+
+            const topMesh = new THREE.Mesh(createCleanSplit(child.geometry, splitY, true), child.material.clone());
+            const botMesh = new THREE.Mesh(createCleanSplit(child.geometry, splitY, false), child.material.clone());
+            [topMesh, botMesh].forEach((m, i) => {
+              m.position.copy(child.position);
+              m.rotation.copy(child.rotation);
+              m.scale.copy(child.scale);
+              (i === 0 ? topHalf : bottomHalf).add(m);
             });
+          }
+        });
+
+        topHalf.position.y = 0.01;
+        bottomHalf.position.y = -0.01;
+        const group = new THREE.Group();
+        group.add(topHalf);
+        group.add(bottomHalf);
+        scene.add(group);
+        controls.target.set(0, 1, 0);
+        controls.update();
+        render();
         
-            window.addEventListener('resize', () => {
-                camera.aspect = container.clientWidth / container.clientHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(container.clientWidth, container.clientHeight);
-                render();
-            });
+        log("✅ Avatar ready");
+      }, undefined, (error) => {
+        log("❌ Model load failed: " + error.message);
+      });
+
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        render();
+      });
+    }
+
+    function render() {
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    init();
+
+    // Start hooking attempts
+    function safeHookStart(attempt = 0) {
+      if (attempt > 10) return;
+
+      try {
+        const parentAudio = parent.document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
+        if (parentAudio) {
+          hookIntoStreamlitAudio();  // call once
+          log("👀 Checking for audio element...");
+        } else {
+          setTimeout(() => safeHookStart(attempt + 1), 500);
         }
-        
-        function render() {
-            controls.update();
-            renderer.render(scene, camera);
-        }
-        
-        init();
-    </script>
+      } catch (e) {
+        // Cross-origin? Still retry.
+        setTimeout(() => safeHookStart(attempt + 1), 500);
+      }
+    }
+
+    safeHookStart();
+    
+    // Enable click-to-test
+    document.addEventListener('click', () => {
+      if (!isAnimating) {
+        log("👆 Click detected - testing animation");
+        startFallbackAnimation();
+      }
+    });
+    
+    log("🚀 Avatar system initialized");
+  </script>
 </body>
 </html>

@@ -102,23 +102,20 @@ if text_prompt:
                 mp3_path = f.name
             wav_path = mp3_path + ".wav"
             AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
-            options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
-            result = audix(wav_path, wavesurfer_options=options)
-            if result:
-                st.write(f"▶️ Current Time: {result['currentTime']}s")
-                if result['selectedRegion']:
-                    st.write(f"🔍 Selected: {result['selectedRegion']['start']} - {result['selectedRegion']['end']}s")
     except Exception as e:
         st.error(f"❌ Error: {e}")
         st.error(traceback.format_exc())
 
-def trigger_avatar_animation(event_type):
+def trigger_avatar_animation(event_type, audio_url=None):
+    payload = {"type": event_type}
+    if audio_url:
+        payload["audioUrl"] = audio_url
     st.components.v1.html(f"""
     <script>
         const iframe = Array.from(parent.document.querySelectorAll('iframe')).find(f =>
             f.contentWindow?.document?.getElementById('three-container'));
         if (iframe) {{
-            iframe.contentWindow.postMessage({{ type: "{event_type}" }}, "*");
+            iframe.contentWindow.postMessage({json.dumps(payload)}, "*");
         }}
     </script>
     """, height=0)
@@ -149,6 +146,13 @@ if audio_value and not st.session_state.get("ai_response_ready", False):
                     mp3_path = f.name
                 wav_path = mp3_path + ".wav"
                 AudioSegment.from_mp3(mp3_path).export(wav_path, format="wav")
+                os.makedirs("static/audio", exist_ok=True)
+                audio_filename = "audio.wav"
+                static_path = os.path.join("static/audio", audio_filename)
+                AudioSegment.from_mp3(mp3_path).export(static_path, format="wav")
+
+                # Save it for later injection
+                st.session_state["tts_audio_url"] = f"http://localhost:8501/static/audio/{audio_filename}"               
                 st.session_state.update({
                     "ai_response_ready": True,
                     "tts_wav_path": wav_path,
@@ -163,13 +167,48 @@ if audio_value and not st.session_state.get("ai_response_ready", False):
 if st.session_state.get("ai_response_ready"):
     st.subheader("✅ Agent's Answer")   
     wav_path = st.session_state["tts_wav_path"]
+    tts_audio_url = st.session_state["tts_audio_url"]  # http://localhost:8501/static/audio/audio.wav
+
     options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
-    result = audix(wav_path, wavesurfer_options=options)
-    if result: 
-        trigger_avatar_animation("AUDIO_PLAYBACK_STARTED")
+
+    # ✅ Only call once, with consistent key
+    audix(wav_path, wavesurfer_options=options, key="agent-audio")
+
+    components.html(f"""
+    <script>
+      const findAudio = () => document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
+      const findIframe = () => Array.from(parent.document.querySelectorAll('iframe')).find(f =>
+        f.contentWindow?.document?.getElementById('three-container'));
+
+      const audio = findAudio();
+      const iframe = findIframe();
+
+      if (audio && iframe && !audio.dataset.hooked) {{
+        audio.dataset.hooked = "true";
+
+        console.log("✅ Hooked into audio element");
+
+        audio.addEventListener('play', () => {{
+          console.log("▶️ Detected audio play");
+          iframe.contentWindow.postMessage({{
+            type: "AUDIO_PLAYBACK_STARTED",
+            audioUrl: "{tts_audio_url}"
+          }}, "*");
+        }});
+
+        console.log("✅ {tts_audio_url} is ready to play");
+        
+        audio.addEventListener('ended', () => {{
+          console.log("🛑 Detected audio ended");
+          iframe.contentWindow.postMessage({{
+            type: "STOP_FLAPPING"
+          }}, "*");
+        }});
+      }} else {{
+        console.warn("❌ Audio or iframe not found, or already hooked");
+      }}
+    </script>
+    """, height=0)
+
     st.warning(f"User: {st.session_state.get('agent_transcription')}")
     st.success(st.session_state.get("agent_text_response", ""))
-    if result:
-        st.write(f"▶️ Current Time: {result['currentTime']}s")
-        if result['selectedRegion']:
-            st.write(f"🔍 Selected: {result['selectedRegion']['start']} - {result['selectedRegion']['end']}s")
