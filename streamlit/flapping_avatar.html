@@ -224,44 +224,65 @@
     // Multiple detection strategies for Streamlit audio
     function hookIntoStreamlitAudio() {
       try {
-        // Strategy 1: Direct iframe parent access
+        // Strategy 1: Hook parent <audio>
         const parentAudio = parent.document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
         if (parentAudio && !parentAudio.dataset.hooked) {
           parentAudio.dataset.hooked = "true";
           log("🔗 Hooked into parent audio");
-          
+
           parentAudio.addEventListener('play', () => {
             log("🔊 Parent audio play detected");
-            startFallbackAnimation(); // Use fallback since we can't analyze cross-origin
+            if (parentAudio.src) {
+              log("🎧 Using parent audio src: " + parentAudio.src);
+              startAudioAnalysisAnimation(parentAudio.src);
+            } else {
+              log("⚠️ Parent audio src not ready, waiting...");
+            }
           });
-          
+
+          parentAudio.addEventListener("canplay", () => {
+            if (!parentAudio.dataset.playStarted && parentAudio.src) {
+              parentAudio.dataset.playStarted = "true";
+              log("🎧 Parent canplay: " + parentAudio.src);
+              startAudioAnalysisAnimation(parentAudio.src);
+            }
+          });
+
           parentAudio.addEventListener('ended', () => {
             log("🔇 Parent audio ended");
             stopAnimation();
           });
         }
-        
-        // Strategy 2: Check for audio in current document
+
+        // Strategy 2: Fallback for local iframe audio (if any)
         const localAudio = document.querySelector('audio');
         if (localAudio && !localAudio.dataset.hooked) {
           localAudio.dataset.hooked = "true";
           log("🔗 Hooked into local audio");
-          
-          localAudio.addEventListener('play', () => {
-            log("🔊 Local audio play detected");
-            if (localAudio.src) {
+
+          localAudio.addEventListener("canplay", () => {
+            if (!localAudio.dataset.playStarted && localAudio.src) {
+              localAudio.dataset.playStarted = "true";
+              log("🎧 Local audio canplay: " + localAudio.src);
               startAudioAnalysisAnimation(localAudio.src);
-            } else {
-              startFallbackAnimation();
             }
           });
+
+          localAudio.addEventListener('play', () => {
+            log("🔊 Local audio play detected");
+          });
+
+          localAudio.addEventListener('ended', () => {
+            log("🔇 Local audio ended");
+            stopAnimation();
+          });
         }
-        
+
       } catch (e) {
-        // Cross-origin restrictions
-        log("⚠️ Cross-origin audio detection limited");
+        log("⚠️ Audio detection failed: " + e.message);
       }
     }
+
 
     function createCleanSplit(geometry, splitY, keepTop) {
       const newGeometry = new THREE.BufferGeometry();
@@ -385,8 +406,7 @@
           }
         });
 
-        topHalf.position.y = 0.01;
-        bottomHalf.position.y = -0.01;
+
         const group = new THREE.Group();
         group.add(topHalf);
         group.add(bottomHalf);
@@ -416,25 +436,70 @@
     init();
 
     // Start hooking attempts
-    function safeHookStart(attempt = 0) {
-      if (attempt > 10) return;
+    function continuousAudioMonitoring() {
+      const hookedElements = new Set();
+    
+      function checkForNewAudioElements() {
+        try {
+          // Look for all audio elements in parent document
+          const audioElements = parent.document.querySelectorAll('audio');
+        
+          audioElements.forEach(audioElement => {
+            // Skip if already hooked
+            if (hookedElements.has(audioElement)) return;
 
-      try {
-        const parentAudio = parent.document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
-        if (parentAudio) {
-          hookIntoStreamlitAudio();  // call once
-          log("👀 Checking for audio element...");
-        } else {
-          setTimeout(() => safeHookStart(attempt + 1), 500);
+            // Mark as hooked
+            hookedElements.add(audioElement);
+            audioElement.dataset.hooked = "true";
+
+            log(`🔗 New audio element detected and hooked`);
+
+            // Add all event listeners
+            audioElement.addEventListener('loadstart', () => {
+              log("📥 Audio loading...");
+            });
+
+            audioElement.addEventListener('canplay', () => {
+              log("✅ Audio ready: " + audioElement.src);
+            });
+
+            audioElement.addEventListener('play', () => {
+              log("▶️ Audio play detected: " + audioElement.src);
+              if (audioElement.src && audioElement.src !== 'about:blank') {
+                startAudioAnalysisAnimation(audioElement.src);
+              } else {
+                log("⚠️ Audio src not ready, using fallback");
+                startFallbackAnimation();
+              }
+            });
+
+            audioElement.addEventListener('ended', () => {
+              log("🔇 Audio ended");
+              stopAnimation();
+            });
+
+            audioElement.addEventListener('error', (e) => {
+              log("❌ Audio error: " + e.message);
+              startFallbackAnimation();
+            });
+          });
+
+        } catch (e) {
+          // Cross-origin issues - continue trying
+          log("⚠️ Cross-origin audio detection: " + e.message);
         }
-      } catch (e) {
-        // Cross-origin? Still retry.
-        setTimeout(() => safeHookStart(attempt + 1), 500);
+
+        // Check again in 500ms
+        setTimeout(checkForNewAudioElements, 500);
       }
+
+      // Start monitoring
+      checkForNewAudioElements();
     }
 
-    safeHookStart();
-    
+    // Replace the safeHookStart() call with:
+    continuousAudioMonitoring();
+
     // Enable click-to-test
     document.addEventListener('click', () => {
       if (!isAnimating) {

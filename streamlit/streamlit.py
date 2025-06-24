@@ -3,15 +3,12 @@ import json
 import traceback
 import streamlit as st
 import httpx
-from uuid import uuid4
 from tempfile import NamedTemporaryFile
 from dotenv import load_dotenv
 from pydub import AudioSegment
 from urllib.parse import urlparse, parse_qs
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 import asyncio
-import socket
-from streamlit_advanced_audio import audix, WaveSurferOptions
 import streamlit.components.v1 as components
 
 # === ENV ===
@@ -169,46 +166,7 @@ if st.session_state.get("ai_response_ready"):
     wav_path = st.session_state["tts_wav_path"]
     tts_audio_url = st.session_state["tts_audio_url"]  # http://localhost:8501/static/audio/audio.wav
 
-    options = WaveSurferOptions(wave_color="#2B88D9", progress_color="#b91d47", height=100)
-
-    # ✅ Only call once, with consistent key
-    audix(wav_path, wavesurfer_options=options, key="agent-audio")
-
-    components.html(f"""
-    <script>
-      const findAudio = () => document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
-      const findIframe = () => Array.from(parent.document.querySelectorAll('iframe')).find(f =>
-        f.contentWindow?.document?.getElementById('three-container'));
-
-      const audio = findAudio();
-      const iframe = findIframe();
-
-      if (audio && iframe && !audio.dataset.hooked) {{
-        audio.dataset.hooked = "true";
-
-        console.log("✅ Hooked into audio element");
-
-        audio.addEventListener('play', () => {{
-          console.log("▶️ Detected audio play");
-          iframe.contentWindow.postMessage({{
-            type: "AUDIO_PLAYBACK_STARTED",
-            audioUrl: "{tts_audio_url}"
-          }}, "*");
-        }});
-
-        console.log("✅ {tts_audio_url} is ready to play");
-        
-        audio.addEventListener('ended', () => {{
-          console.log("🛑 Detected audio ended");
-          iframe.contentWindow.postMessage({{
-            type: "STOP_FLAPPING"
-          }}, "*");
-        }});
-      }} else {{
-        console.warn("❌ Audio or iframe not found, or already hooked");
-      }}
-    </script>
-    """, height=0)
+    st.audio(wav_path, format="audio/wav", start_time=0)
 
     st.warning(f"User: {st.session_state.get('agent_transcription')}")
     st.success(st.session_state.get("agent_text_response", ""))

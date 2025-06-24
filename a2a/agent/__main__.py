@@ -53,22 +53,8 @@ def convert_mp3_to_pcm_wav(mp3_path: Path) -> Path:
     audio.export(wav_path, format="wav")
     return wav_path
 
-async def trigger_audio2face_animation(wav_path: Path, config="config/config_mark.yml"):
-    command = [
-        "python3", "./a2a/nim_a2f_3d_client.py",
-        str(wav_path),
-        config
-    ]
-    try:
-        print(f"🎭 Invoking Audio2Face with: {wav_path}")
-        proc = await asyncio.create_subprocess_exec(*command)
-        await proc.communicate()
-        print("✅ A2F animation triggered.")
-    except Exception as e:
-        print(f"❌ A2F animation error: {e}")
-
 # === OpenAI TTS Function ===
-def generate_openai_tts(text: str, voice: str = "nova", model: str = "gpt-4o-mini-tts") -> str:
+def generate_openai_tts(text: str, voice: str = "ash", model: str = "gpt-4o-mini-tts") -> str:
     filename = f"tts_{uuid.uuid4().hex}.mp3"
     full_path = TTS_DIR / filename
     with client.audio.speech.with_streaming_response.create(
@@ -81,8 +67,6 @@ def generate_openai_tts(text: str, voice: str = "nova", model: str = "gpt-4o-min
 
     # Trigger Audio2Face (optional)
     wav_path = convert_mp3_to_pcm_wav(full_path)
-    asyncio.create_task(trigger_audio2face_animation(wav_path))
-
     return filename
 
 # === OAuth Setup ===
