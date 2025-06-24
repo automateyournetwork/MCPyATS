@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flapping Avatar</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; }
+        canvas { display: block; }
+        #three-container { width: 100vw; height: 100vh; }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
+            "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="three-container"></div>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+            
+        let camera, scene, renderer, topHalf, bottomHalf, controls, flapInterval;
+            
+        function flapMouthStart() {
+            let distance = 0;
+            let opening = true;
+            clearInterval(flapInterval);
+            flapInterval = setInterval(() => {
+                if (!bottomHalf || !topHalf) return;
+                if (opening) {
+                    distance += 0.01;
+                    if (distance >= 0.3) opening = false; // Max separation
+                } else {
+                    distance -= 0.01;
+                    if (distance <= 0) opening = true;
+                }
+                // Move halves vertically up and down
+                topHalf.position.y = distance;
+                bottomHalf.position.y = -distance;
+                render();
+            }, 33); // ~30fps
+        }
+        
+        function flapMouthStop() {
+            clearInterval(flapInterval);
+            if (bottomHalf && topHalf) {
+                bottomHalf.position.y = -0.01;
+                topHalf.position.y = 0.01;
+                render();
+            }
+        }
+        
+        window.addEventListener("message", (event) => {
+            if (event.data?.type === "AUDIO_PLAYBACK_STARTED") {
+                flapMouthStart();
+                setTimeout(() => flapMouthStop(), event.data.duration || 15000);
+            }
+        });
+        
+        // MODIFIED createCleanSplit FUNCTION
+        function createCleanSplit(geometry, splitY, keepTop) {
+            const newGeometry = new THREE.BufferGeometry();
+            const positions = geometry.attributes.position.array;
+            const normals = geometry.attributes.normal ? geometry.attributes.normal.array : null;
+            const uvs = geometry.attributes.uv ? geometry.attributes.uv.array : null;
+            const colors = geometry.attributes.color ? geometry.attributes.color.array : null;
+            const indices = geometry.index ? geometry.index.array : Array.from({ length: positions.length / 3 }, (_, i) => i);
+        
+            const newPositions = [];
+            const newNormals = [];
+            const newUvs = [];
+            const newColors = [];
+            const newIndices = [];
+        
+            const vertexMap = new Map(); // Maps original vertex index to new vertex index
+            let newVertexIndex = 0;
+        
+            for (let i = 0; i < indices.length; i += 3) {
+                const iA = indices[i];
+                const iB = indices[i + 1];
+                const iC = indices[i + 2];
+            
+                const yA = positions[iA * 3 + 1];
+                const yB = positions[iB * 3 + 1];
+                const yC = positions[iC * 3 + 1];
+            
+                let triangleKeepCount = 0;
+                if ((keepTop && yA >= splitY) || (!keepTop && yA <= splitY)) triangleKeepCount++;
+                if ((keepTop && yB >= splitY) || (!keepTop && yB <= splitY)) triangleKeepCount++;
+                if ((keepTop && yC >= splitY) || (!keepTop && yC <= splitY)) triangleKeepCount++;
+            
+                // Only keep the triangle if all its vertices are on the "keep" side of the split line
+                // This is a simple approach and will cut off triangles crossing the split line.
+                // For a perfectly clean cut, you'd need to generate new vertices along the split line,
+                // which is significantly more complex.
+                if (triangleKeepCount === 3) {
+                    [iA, iB, iC].forEach(originalIndex => {
+                        if (!vertexMap.has(originalIndex)) {
+                            vertexMap.set(originalIndex, newVertexIndex);
+                            newPositions.push(positions[originalIndex * 3], positions[originalIndex * 3 + 1], positions[originalIndex * 3 + 2]);
+                            if (normals) newNormals.push(normals[originalIndex * 3], normals[originalIndex * 3 + 1], normals[originalIndex * 3 + 2]);
+                            if (uvs) newUvs.push(uvs[originalIndex * 2], uvs[originalIndex * 2 + 1]);
+                            if (colors) newColors.push(colors[originalIndex * 3], colors[originalIndex * 3 + 1], colors[originalIndex * 3 + 2]);
+                            newVertexIndex++;
+                        }
+                        newIndices.push(vertexMap.get(originalIndex));
+                    });
+                }
+            }
+        
+            if (newPositions.length === 0) {
+                return new THREE.BufferGeometry(); // Return empty if no vertices are kept
+            }
+        
+            newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
+            if (normals && newNormals.length > 0) newGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(newNormals, 3));
+            if (uvs && newUvs.length > 0) newGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(newUvs, 2));
+            if (colors && newColors.length > 0) newGeometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
+            newGeometry.setIndex(newIndices);
+        
+            newGeometry.computeVertexNormals(); // Recalculate normals for the new geometry
+            return newGeometry;
+        }
+        
+        
+        function init() {
+            const container = document.getElementById('three-container');
+        
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+            camera.position.set(0, 1.5, 3);
+        
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+        
+            const light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(2, 3, 2);
+            scene.add(light);
+        
+            const ambient = new THREE.AmbientLight(0x999999);
+            scene.add(ambient);
+        
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.appendChild(renderer.domElement);
+        
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 1, 0);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.enableZoom = true;
+            controls.enableRotate = true;
+            controls.enablePan = true;
+            controls.update();
+        
+            const loader = new GLTFLoader();
+            loader.load("{{MODEL_URL}}", (gltf) => {
+                const model = gltf.scene;
+                const box = new THREE.Box3().setFromObject(model);
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                model.position.sub(center);
+            
+                const splitY = box.min.y + (box.max.y - box.min.y) * 0.6;
+                const gap = 0.01;
+            
+                topHalf = new THREE.Group();
+                bottomHalf = new THREE.Group();
+            
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        const childBox = new THREE.Box3().setFromObject(child);
+                    
+                        if (childBox.max.y < splitY - 0.1 || childBox.min.y > splitY + 0.1) {
+                            return;
+                        }
+                    
+                        let hasBodyColor = false;
+                        if (child.material && child.material.color) {
+                            const color = child.material.color;
+                            if (color.b > color.r && color.b > color.g && color.b > 0.5) {
+                                hasBodyColor = true;
+                            }
+                        }
+                        if (Array.isArray(child.material)) {
+                            child.material.forEach(mat => {
+                                if (mat.color) {
+                                    const color = mat.color;
+                                    if (color.b > color.r && color.b > color.g && color.b > 0.5) {
+                                        hasBodyColor = true;
+                                    }
+                                }
+                            });
+                        }
+                        
+                        if (hasBodyColor) {
+                            // For body/shirt, add the whole mesh to both halves initially,
+                            // and let the flapMouth function handle the movement or hide as needed.
+                            // Or, simply add it to the scene once if it shouldn't flap.
+                            // For now, let's skip splitting these parts if they aren't part of the mouth.
+                            // If you want the body to stay still, add it directly to the scene.
+                            const cloneMaterial = Array.isArray(child.material) ? 
+                                child.material.map(m => m.clone()) : 
+                                child.material.clone();
+                            const cloneMesh = new THREE.Mesh(child.geometry, cloneMaterial);
+                            cloneMesh.position.copy(child.position);
+                            cloneMesh.rotation.copy(child.rotation);
+                            cloneMesh.scale.copy(child.scale);
+                            scene.add(cloneMesh); // Add full body/shirt to scene
+                            return; // Skip splitting this mesh
+                        }
+                        
+                        const topGeometry = createCleanSplit(child.geometry, splitY, true);
+                        const topMaterial = Array.isArray(child.material) ? 
+                            child.material.map(m => m.clone()) : 
+                            child.material.clone();
+                        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
+                        topMesh.position.copy(child.position);
+                        topMesh.rotation.copy(child.rotation);
+                        topMesh.scale.copy(child.scale);
+                        topHalf.add(topMesh);
+                        
+                        const bottomGeometry = createCleanSplit(child.geometry, splitY, false);
+                        const bottomMaterial = Array.isArray(child.material) ? 
+                            child.material.map(m => m.clone()) : 
+                            child.material.clone();
+                        const bottomMesh = new THREE.Mesh(bottomGeometry, bottomMaterial);
+                        bottomMesh.position.copy(child.position);
+                        bottomMesh.rotation.copy(child.rotation);
+                        bottomMesh.scale.copy(child.scale);
+                        bottomHalf.add(bottomMesh);
+                    }
+                });
+            
+                topHalf.position.y = 0.01;
+                bottomHalf.position.y = -0.01;
+            
+                const group = new THREE.Group();
+                group.add(topHalf);
+                group.add(bottomHalf);
+                scene.add(group);
+            
+                controls.target.set(0, 1, 0);
+                controls.update();
+                render();
+            });
+        
+            window.addEventListener('resize', () => {
+                camera.aspect = container.clientWidth / container.clientHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(container.clientWidth, container.clientHeight);
+                render();
+            });
+        }
+        
+        function render() {
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        init();
+    </script>
+</body>
+</html>
