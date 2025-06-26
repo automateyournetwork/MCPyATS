@@ -162,23 +162,32 @@
       analyser.getByteFrequencyData(dataArray);
 
       // Focus on bins that cover ~300–3000 Hz for human voice
-      const voiceBins = dataArray.slice(2, 40); // tweak as needed
+      const voiceBins = dataArray.slice(2, 40);
       const avg = voiceBins.reduce((sum, val) => sum + val, 0) / voiceBins.length;
 
       // Normalize to 0–1
       let volume = avg / 255;
 
-      // Noise gate to skip low ambient noise
+      // Noise gate
       const noiseThreshold = 0.1;
       volume = volume < noiseThreshold ? 0 : (volume - noiseThreshold) / (1 - noiseThreshold);
 
-      // Smooth volume changes
+      // Smooth changes
       flapIntensity += (volume - flapIntensity) * 0.3;
 
       if (topHalf && bottomHalf) {
-        const distance = flapIntensity * 0.4; // scaling for realism
-        topHalf.position.y = Math.max(0.01, distance);
-        bottomHalf.position.y = Math.min(-0.01, -distance);
+        const time = performance.now() / 1000;
+
+        const distance = flapIntensity * 0.15;
+        const wobbleX = Math.sin(time * 3 + Math.random() * 0.5) * 0.025 * flapIntensity;
+        const bob = Math.sin(time * 2.5) * 0.015 * flapIntensity;
+
+        topHalf.position.y = Math.max(0.01, distance + bob);
+        bottomHalf.position.y = Math.min(-0.01, -distance + bob);
+
+        bottomHalf.position.x = wobbleX;
+        bottomHalf.rotation.z = Math.sin(time * 4) * 0.04 * flapIntensity;
+
         render();
       }
 
@@ -191,19 +200,20 @@
         cancelAnimationFrame(animationId);
         animationId = null;
       }
-      
+  
       if (audioElement) {
         audioElement.pause();
         audioElement = null;
       }
-      
-      // Reset positions
+  
       if (topHalf && bottomHalf) {
         topHalf.position.y = 0.01;
         bottomHalf.position.y = -0.01;
+        bottomHalf.position.x = 0;
+        bottomHalf.rotation.z = 0;
         render();
       }
-      
+  
       flapIntensity = 0;
       log("🛑 Animation stopped");
     }
