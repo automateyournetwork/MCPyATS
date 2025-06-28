@@ -2,6 +2,7 @@ import json
 import os
 from uuid import uuid4
 import httpx
+import asyncio
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events.event_queue import EventQueue
@@ -49,7 +50,7 @@ class LangGraphAgentExecutor(AgentExecutor):
             await self.delegate_to_peer(best_agent, query, context_id, task_id, event_queue)
         else:
             print("❌ No matching agent found.")
-            event_queue.enqueue_event(TaskStatusUpdateEvent(
+            await event_queue.enqueue_event(TaskStatusUpdateEvent(
                 status=TaskStatus(
                     state=TaskState.failed,
                     message=new_agent_text_message("No agent found to handle the request.", context_id, task_id),
@@ -99,7 +100,7 @@ class LangGraphAgentExecutor(AgentExecutor):
                 if not final_content:
                     raise RuntimeError("❌ No usable content returned")
 
-                event_queue.enqueue_event(TaskStatusUpdateEvent(
+                await event_queue.enqueue_event(TaskStatusUpdateEvent(
                     status=TaskStatus(
                         state=TaskState.completed,
                         message=new_agent_text_message(final_content, context_id, task_id)
@@ -112,7 +113,7 @@ class LangGraphAgentExecutor(AgentExecutor):
         except Exception as e:
             error_msg = f"🔥 Exception: {e}"
             print(error_msg)
-            event_queue.enqueue_event(TaskStatusUpdateEvent(
+            await event_queue.enqueue_event(TaskStatusUpdateEvent(
                 status=TaskStatus(
                     state=TaskState.failed,
                     message=new_agent_text_message(error_msg, context_id, task_id),
@@ -166,7 +167,7 @@ class LangGraphAgentExecutor(AgentExecutor):
 
             final_msg = "\n".join(final_chunks).strip() or "✅ Delegated, but no final message received."
 
-            event_queue.enqueue_event(TaskStatusUpdateEvent(
+            await event_queue.enqueue_event(TaskStatusUpdateEvent(
                 status=TaskStatus(
                     state=TaskState.completed,
                     message=new_agent_text_message(final_msg, context_id, task_id),
@@ -179,7 +180,7 @@ class LangGraphAgentExecutor(AgentExecutor):
         except Exception as e:
             error_msg = f"❌ Failed to delegate to peer: {e}"
             print(error_msg)
-            event_queue.enqueue_event(TaskStatusUpdateEvent(
+            await event_queue.enqueue_event(TaskStatusUpdateEvent(
                 status=TaskStatus(
                     state=TaskState.failed,
                     message=new_agent_text_message(error_msg, context_id, task_id),

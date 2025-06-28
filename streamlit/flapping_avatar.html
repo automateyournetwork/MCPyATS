@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Flapping Avatar</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #111; }
+    canvas { display: block; }
+    #three-container { width: 100vw; height: 100vh; }
+    #debug { 
+      position: absolute; 
+      top: 10px; 
+      left: 10px; 
+      color: white; 
+      font-family: monospace; 
+      font-size: 12px;
+      background: rgba(0,0,0,0.7);
+      padding: 5px;
+      border-radius: 3px;
+      z-index: 1000;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.module.js",
+      "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.149.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="debug">Waiting for audio...</div>
+  <div id="three-container"></div>
+  <script type="module">
+    window.addEventListener("message", e => console.log("🛰️ RECEIVED POSTMESSAGE", e.data));
+
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+    let camera, scene, renderer, topHalf, bottomHalf, controls;
+    let audioCtx, analyser, dataArray, audioSource, audioElement;
+    let animationId;
+    let isAnimating = false;
+    let flapIntensity = 0;
+    
+    const debug = document.getElementById('debug');
+
+    function log(message) {
+      console.log(message);
+      debug.textContent = message;
+    }
+
+    // Fallback animation when audio analysis fails
+    function startFallbackAnimation() {
+      if (isAnimating) return;
+      isAnimating = true;
+      log("🎭 Starting fallback animation");
+      
+      const startTime = Date.now();
+      const duration = 3000; // 3 seconds of animation
+      
+      function animate() {
+        if (!isAnimating) return;
+        
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Create a flapping pattern
+        const flapSpeed = 8; // flaps per second
+        const flapPattern = Math.sin(elapsed * flapSpeed * Math.PI / 1000);
+        const intensity = 0.15 * (1 - progress * 0.7); // fade out over time
+        
+        if (topHalf && bottomHalf) {
+          const distance = Math.abs(flapPattern) * intensity;
+          topHalf.position.y = Math.max(0.01, distance);
+          bottomHalf.position.y = Math.min(-0.01, -distance);
+          render();
+        }
+        
+        if (progress < 1) {
+          animationId = requestAnimationFrame(animate);
+        } else {
+          stopAnimation();
+        }
+      }
+      
+      animate();
+    }
+
+    function startAudioAnalysisAnimation(audioUrl) {
+      if (isAnimating) stopAnimation();
+      
+      try {
+        log("🎵 Attempting audio analysis...");
+        
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        
+        // Resume audio context if needed
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().then(() => {
+            log("🔊 Audio context resumed");
+          });
+        }
+
+        audioElement = new Audio();
+        audioElement.preload = "auto";
+        
+        audioElement.addEventListener('loadstart', () => log("📥 Loading audio..."));
+        audioElement.addEventListener('canplaythrough', () => log("✅ Audio ready"));
+        audioElement.addEventListener('play', () => log("▶️ Audio started"));
+        
+        audioElement.addEventListener('error', (e) => {
+          log("❌ Audio error, using fallback");
+          startFallbackAnimation();
+        });
+
+        audioElement.addEventListener('play', () => {
+          try {
+            audioSource = audioCtx.createMediaElementSource(audioElement);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.7;
+        
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            audioSource.connect(analyser);
+            analyser.connect(audioCtx.destination);
+        
+            isAnimating = true;
+            log("🎤 Audio analysis active");
+            animateWithAudio();
+          } catch (err) {
+            log("❌ Audio analysis failed, using fallback");
+            startFallbackAnimation();
+          }
+        });
+
+        audioElement.src = audioUrl;
+        audioElement.play().catch(() => {
+          log("❌ Play failed, using fallback");
+          startFallbackAnimation();
+        });
+
+        audioElement.onended = () => {
+          log("🏁 Audio ended");
+          stopAnimation();
+        };
+
+      } catch (error) {
+        log("❌ Audio init failed, using fallback");
+        startFallbackAnimation();
+      }
+    }
+
+    function animateWithAudio() {
+      if (!isAnimating || !analyser) return;
+
+      analyser.getByteFrequencyData(dataArray);
+
+      // Focus on bins that cover ~300–3000 Hz for human voice
+      const voiceBins = dataArray.slice(2, 40);
+      const avg = voiceBins.reduce((sum, val) => sum + val, 0) / voiceBins.length;
+
+      // Normalize to 0–1
+      let volume = avg / 255;
+
+      // Noise gate
+      const noiseThreshold = 0.1;
+      volume = volume < noiseThreshold ? 0 : (volume - noiseThreshold) / (1 - noiseThreshold);
+
+      // Smooth changes
+      flapIntensity += (volume - flapIntensity) * 0.3;
+
+      if (topHalf && bottomHalf) {
+        const time = performance.now() / 1000;
+
+        const distance = flapIntensity * 0.15;
+        const wobbleX = Math.sin(time * 3 + Math.random() * 0.5) * 0.025 * flapIntensity;
+        const bob = Math.sin(time * 2.5) * 0.015 * flapIntensity;
+
+        topHalf.position.y = Math.max(0.01, distance + bob);
+        bottomHalf.position.y = Math.min(-0.01, -distance + bob);
+
+        bottomHalf.position.x = wobbleX;
+        bottomHalf.rotation.z = Math.sin(time * 4) * 0.04 * flapIntensity;
+
+        render();
+      }
+
+      animationId = requestAnimationFrame(animateWithAudio);
+    }
+
+    function stopAnimation() {
+      isAnimating = false;
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+  
+      if (audioElement) {
+        audioElement.pause();
+        audioElement = null;
+      }
+  
+      if (topHalf && bottomHalf) {
+        topHalf.position.y = 0.01;
+        bottomHalf.position.y = -0.01;
+        bottomHalf.position.x = 0;
+        bottomHalf.rotation.z = 0;
+        render();
+      }
+  
+      flapIntensity = 0;
+      log("🛑 Animation stopped");
+    }
+
+    // Enhanced message listener
+    window.addEventListener("message", (event) => {
+      log(`📨 Message: ${JSON.stringify(event.data)}`);
+      
+      if (event.data?.type === "AUDIO_PLAYBACK_STARTED" && event.data.audioUrl) {
+        startAudioAnalysisAnimation(event.data.audioUrl);
+      } else if (event.data?.type === "START_FLAPPING") {
+        startFallbackAnimation();
+      } else if (event.data?.type === "STOP_FLAPPING") {
+        stopAnimation();
+      }
+    });
+
+    // Multiple detection strategies for Streamlit audio
+    function hookIntoStreamlitAudio() {
+      try {
+        // Strategy 1: Hook parent <audio>
+        const parentAudio = parent.document.querySelector('#agent-audio audio, [data-testid="stAudio"] audio, audio');
+        if (parentAudio && !parentAudio.dataset.hooked) {
+          parentAudio.dataset.hooked = "true";
+          log("🔗 Hooked into parent audio");
+
+          parentAudio.addEventListener('play', () => {
+            log("🔊 Parent audio play detected");
+            if (parentAudio.src) {
+              log("🎧 Using parent audio src: " + parentAudio.src);
+              startAudioAnalysisAnimation(parentAudio.src);
+            } else {
+              log("⚠️ Parent audio src not ready, waiting...");
+            }
+          });
+
+          parentAudio.addEventListener("canplay", () => {
+            if (!parentAudio.dataset.playStarted && parentAudio.src) {
+              parentAudio.dataset.playStarted = "true";
+              log("🎧 Parent canplay: " + parentAudio.src);
+              startAudioAnalysisAnimation(parentAudio.src);
+            }
+          });
+
+          parentAudio.addEventListener('ended', () => {
+            log("🔇 Parent audio ended");
+            stopAnimation();
+          });
+        }
+
+        // Strategy 2: Fallback for local iframe audio (if any)
+        const localAudio = document.querySelector('audio');
+        if (localAudio && !localAudio.dataset.hooked) {
+          localAudio.dataset.hooked = "true";
+          log("🔗 Hooked into local audio");
+
+          localAudio.addEventListener("canplay", () => {
+            if (!localAudio.dataset.playStarted && localAudio.src) {
+              localAudio.dataset.playStarted = "true";
+              log("🎧 Local audio canplay: " + localAudio.src);
+              startAudioAnalysisAnimation(localAudio.src);
+            }
+          });
+
+          localAudio.addEventListener('play', () => {
+            log("🔊 Local audio play detected");
+          });
+
+          localAudio.addEventListener('ended', () => {
+            log("🔇 Local audio ended");
+            stopAnimation();
+          });
+        }
+
+      } catch (e) {
+        log("⚠️ Audio detection failed: " + e.message);
+      }
+    }
+
+
+    function createCleanSplit(geometry, splitY, keepTop) {
+      const newGeometry = new THREE.BufferGeometry();
+      const positions = geometry.attributes.position.array;
+      const normals = geometry.attributes.normal?.array;
+      const uvs = geometry.attributes.uv?.array;
+      const colors = geometry.attributes.color?.array;
+      const indices = geometry.index ? geometry.index.array : Array.from({ length: positions.length / 3 }, (_, i) => i);
+
+      const newPositions = [], newNormals = [], newUvs = [], newColors = [], newIndices = [];
+      const vertexMap = new Map();
+      let newVertexIndex = 0;
+
+      for (let i = 0; i < indices.length; i += 3) {
+        const iA = indices[i], iB = indices[i + 1], iC = indices[i + 2];
+        const yA = positions[iA * 3 + 1], yB = positions[iB * 3 + 1], yC = positions[iC * 3 + 1];
+
+        let triangleKeepCount = 0;
+        if ((keepTop && yA >= splitY) || (!keepTop && yA <= splitY)) triangleKeepCount++;
+        if ((keepTop && yB >= splitY) || (!keepTop && yB <= splitY)) triangleKeepCount++;
+        if ((keepTop && yC >= splitY) || (!keepTop && yC <= splitY)) triangleKeepCount++;
+
+        if (triangleKeepCount === 3) {
+          [iA, iB, iC].forEach(originalIndex => {
+            if (!vertexMap.has(originalIndex)) {
+              vertexMap.set(originalIndex, newVertexIndex++);
+              newPositions.push(positions[originalIndex * 3], positions[originalIndex * 3 + 1], positions[originalIndex * 3 + 2]);
+              if (normals) newNormals.push(normals[originalIndex * 3], normals[originalIndex * 3 + 1], normals[originalIndex * 3 + 2]);
+              if (uvs) newUvs.push(uvs[originalIndex * 2], uvs[originalIndex * 2 + 1]);
+              if (colors) newColors.push(colors[originalIndex * 3], colors[originalIndex * 3 + 1], colors[originalIndex * 3 + 2]);
+            }
+            newIndices.push(vertexMap.get(originalIndex));
+          });
+        }
+      }
+
+      if (newPositions.length === 0) return new THREE.BufferGeometry();
+      newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
+      if (normals && newNormals.length) newGeometry.setAttribute('normal', new THREE.Float32BufferAttribute(newNormals, 3));
+      if (uvs && newUvs.length) newGeometry.setAttribute('uv', new THREE.Float32BufferAttribute(newUvs, 2));
+      if (colors && newColors.length) newGeometry.setAttribute('color', new THREE.Float32BufferAttribute(newColors, 3));
+      newGeometry.setIndex(newIndices);
+      newGeometry.computeVertexNormals();
+      return newGeometry;
+    }
+
+    function init() {
+      const container = document.getElementById('three-container');
+      camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+      camera.position.set(0, 0, 4.5);
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111111);
+
+      const light = new THREE.DirectionalLight(0xffffff, 1);
+      light.position.set(2, 3, 2);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0x999999));
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 1, 0);
+      controls.enableDamping = true;
+      controls.update();
+
+      const loader = new GLTFLoader();
+      
+      // Replace with your actual model URL
+      const modelUrl = "{{MODEL_URL}}"; // You'll need to replace this
+      
+      loader.load(modelUrl, (gltf) => {
+        log("📦 Model loaded");
+        const model = gltf.scene;
+        const box = new THREE.Box3().setFromObject(model);
+        const splitY = box.min.y + (box.max.y - box.min.y) * 0.6;
+
+        topHalf = new THREE.Group();
+        bottomHalf = new THREE.Group();
+
+        model.traverse((child) => {
+          if (child.isMesh) {
+            const childBox = new THREE.Box3().setFromObject(child);
+            if (childBox.max.y < splitY - 0.1 || childBox.min.y > splitY + 0.1) return;
+
+            let hasBodyColor = false;
+            if (child.material?.color) {
+              const c = child.material.color;
+              if (c.b > c.r && c.b > c.g && c.b > 0.5) hasBodyColor = true;
+            }
+
+            if (Array.isArray(child.material)) {
+              child.material.forEach(mat => {
+                if (mat.color) {
+                  const c = mat.color;
+                  if (c.b > c.r && c.b > c.g && c.b > 0.5) hasBodyColor = true;
+                }
+              });
+            }
+
+            if (hasBodyColor) {
+              const cloneMat = Array.isArray(child.material) ? child.material.map(m => m.clone()) : child.material.clone();
+              const clone = new THREE.Mesh(child.geometry, cloneMat);
+              clone.position.copy(child.position);
+              clone.rotation.copy(child.rotation);
+              clone.scale.copy(child.scale);
+              scene.add(clone);
+              return;
+            }
+
+            const topMesh = new THREE.Mesh(createCleanSplit(child.geometry, splitY, true), child.material.clone());
+            const botMesh = new THREE.Mesh(createCleanSplit(child.geometry, splitY, false), child.material.clone());
+            [topMesh, botMesh].forEach((m, i) => {
+              m.position.copy(child.position);
+              m.rotation.copy(child.rotation);
+              m.scale.copy(child.scale);
+              (i === 0 ? topHalf : bottomHalf).add(m);
+            });
+          }
+        });
+
+
+        const group = new THREE.Group();
+        group.add(topHalf);
+        group.add(bottomHalf);
+        scene.add(group);
+        controls.target.set(0, 1, 0);
+        controls.update();
+        render();
+        
+        log("✅ Avatar ready");
+      }, undefined, (error) => {
+        log("❌ Model load failed: " + error.message);
+      });
+
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        render();
+      });
+    }
+
+    function render() {
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    init();
+
+    // Start hooking attempts
+    function continuousAudioMonitoring() {
+      const hookedElements = new Set();
+    
+      function checkForNewAudioElements() {
+        try {
+          // Look for all audio elements in parent document
+          const audioElements = parent.document.querySelectorAll('audio');
+        
+          audioElements.forEach(audioElement => {
+            // Skip if already hooked
+            if (hookedElements.has(audioElement)) return;
+
+            // Mark as hooked
+            hookedElements.add(audioElement);
+            audioElement.dataset.hooked = "true";
+
+            log(`🔗 New audio element detected and hooked`);
+
+            // Add all event listeners
+            audioElement.addEventListener('loadstart', () => {
+              log("📥 Audio loading...");
+            });
+
+            audioElement.addEventListener('canplay', () => {
+              log("✅ Audio ready: " + audioElement.src);
+            });
+
+            audioElement.addEventListener('play', () => {
+              log("▶️ Audio play detected: " + audioElement.src);
+              if (audioElement.src && audioElement.src !== 'about:blank') {
+                startAudioAnalysisAnimation(audioElement.src);
+              } else {
+                log("⚠️ Audio src not ready, using fallback");
+                startFallbackAnimation();
+              }
+            });
+
+            audioElement.addEventListener('ended', () => {
+              log("🔇 Audio ended");
+              stopAnimation();
+            });
+
+            audioElement.addEventListener('error', (e) => {
+              log("❌ Audio error: " + e.message);
+              startFallbackAnimation();
+            });
+          });
+
+        } catch (e) {
+          // Cross-origin issues - continue trying
+          log("⚠️ Cross-origin audio detection: " + e.message);
+        }
+
+        // Check again in 500ms
+        setTimeout(checkForNewAudioElements, 500);
+      }
+
+      // Start monitoring
+      checkForNewAudioElements();
+    }
+
+    // Replace the safeHookStart() call with:
+    continuousAudioMonitoring();
+
+    // Enable click-to-test
+    document.addEventListener('click', () => {
+      if (!isAnimating) {
+        log("👆 Click detected - testing animation");
+        startFallbackAnimation();
+      }
+    });
+    
+    log("🚀 Avatar system initialized");
+  </script>
+</body>
+</html>

@@ -8,3 +8,8 @@ starlette
 itsdangerous
 google-auth
 requests
+gTTS
+python-multipart
+SpeechRecognition
+pydub
+openai
