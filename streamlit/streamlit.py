@@ -132,7 +132,7 @@ if audio_value and not st.session_state.get("ai_response_ready", False):
         with open(wav_path, "rb") as f:
             files = {"file": ("voice.wav", f, "audio/wav")}
             headers = {"Authorization": f"Bearer {st.session_state['id_token']}"}
-            response = httpx.post(audio_url, files=files, headers=headers, timeout=60)
+            response = httpx.post(audio_url, files=files, headers=headers, timeout=120)
             response.raise_for_status()
             data = response.json()
             tts_url = data.get("tts_url")

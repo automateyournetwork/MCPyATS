@@ -132,7 +132,7 @@ async def handle_audio_input(file: UploadFile = File(...)):
             }
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             post_response = await client.post(f"{PUBLIC_URL}/", json=request_payload)
             post_response.raise_for_status()
             task_response = post_response.json()
