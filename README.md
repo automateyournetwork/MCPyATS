@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/automateyournetwork-mcpyats-badge.png)](https://mseep.ai/app/automateyournetwork-mcpyats)
+
 # 🧠 MCPyATS: AI-Powered Network Automation with MCP + Cisco pyATS
 
 ## 🚀 Overview
